@@ -1,0 +1,214 @@
+/* texc editor: CodeMirror theme, inline AI diff review, search dialog, completion
+   list and the editor's loading/empty/error states. */
+
+#editor-host { background: var(--bg); overflow: hidden; }
+/* The wrapper's bottom is set from JS to the top of the docked chat. */
+#editor-host .CodeMirror { position: absolute; top: 0; left: 0; right: 0; bottom: 0; height: auto; }
+
+/* ---------------------------------------------------------------- theme */
+.cm-s-texc.CodeMirror {
+  background: var(--bg);
+  color: var(--syn-text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  font-variant-ligatures: none;
+}
+.cm-s-texc .CodeMirror-lines { padding: 10px 0 48px; }
+.cm-s-texc pre.CodeMirror-line,
+.cm-s-texc pre.CodeMirror-line-like { padding: 0 20px 0 4px; } /* the 4px is BASE_PAD in editor.js */
+.cm-s-texc .CodeMirror-gutters { background: var(--bg); border-right: 0; }
+.cm-s-texc .CodeMirror-linenumber {
+  color: var(--syn-gutter);
+  padding: 0 8px 0 14px; /* 8px + the line's 4px = the 12px gap to the text */
+  min-width: 22px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.cm-s-texc .CodeMirror-activeline-gutter .CodeMirror-linenumber { color: #8c8c8c; }
+.cm-s-texc .CodeMirror-activeline-background { background: #0c0c0c; }
+.cm-s-texc .CodeMirror-cursor { border-left: 1.5px solid #e8e8e8; }
+.cm-s-texc .CodeMirror-selected { background: rgba(255, 255, 255, .10); }
+.cm-s-texc.CodeMirror-focused .CodeMirror-selected { background: rgba(86, 140, 255, .32); }
+.cm-s-texc .CodeMirror-line::selection,
+.cm-s-texc .CodeMirror-line > span::selection,
+.cm-s-texc .CodeMirror-line > span > span::selection { background: rgba(86, 140, 255, .32); }
+.cm-s-texc .CodeMirror-scrollbar-filler,
+.cm-s-texc .CodeMirror-gutter-filler { background: var(--bg); }
+.cm-s-texc .CodeMirror-placeholder { color: #4a4a4a; }
+.cm-s-texc.CodeMirror span.CodeMirror-matchingbracket { color: #fff !important; background: rgba(255, 255, 255, .10); border-radius: 2px; box-shadow: 0 0 0 1px rgba(255, 255, 255, .22); }
+.cm-s-texc.CodeMirror span.CodeMirror-nonmatchingbracket { color: var(--red) !important; }
+
+/* LaTeX tokens (texc-latex mode). Later rules win, so math beats brace/arg colours. */
+.cm-s-texc .cm-tex-cmd { color: var(--syn-cmd); }
+.cm-s-texc .cm-tex-arg,
+.cm-s-texc .cm-tex-brace { color: var(--syn-arg); }
+.cm-s-texc .cm-tex-math { color: var(--syn-math); }
+.cm-s-texc .cm-tex-comment { color: var(--syn-comment); font-style: italic; }
+.cm-s-texc .cm-tex-number { color: var(--syn-number); }
+.cm-s-texc .cm-tex-verb { color: #bdbdbd; }
+.cm-s-texc .cm-searching { background: rgba(229, 192, 123, .22); box-shadow: 0 0 0 1px rgba(229, 192, 123, .35); border-radius: 2px; }
+
+/* goto() flash */
+@keyframes texc-flash { from { background: rgba(229, 192, 123, .28); } to { background: transparent; } }
+.cm-s-texc .texc-flash { animation: texc-flash 1.2s ease-out forwards; }
+
+/* ---------------------------------------------------------------- inline AI diff review */
+.cm-s-texc .texc-hunk-bg { background: var(--green-bg); }
+.cm-s-texc .texc-hunk-bg.CodeMirror-activeline-background { background: rgba(34, 197, 94, .19); }
+.cm-s-texc .texc-hunk-line .CodeMirror-linenumber { color: var(--green); }
+.cm-s-texc .texc-ins { background: var(--green-strong); }
+.cm-s-texc .texc-ins-s { border-top-left-radius: 2px; border-bottom-left-radius: 2px; }
+.cm-s-texc .texc-ins-e { border-top-right-radius: 2px; border-bottom-right-radius: 2px; }
+
+/* Line backgrounds (the green tint, the active line) span the line's widgets too, so the widget
+   paints an opaque base of its own. */
+.texc-hunk { position: relative; background: var(--bg); }
+.texc-hunk-bar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 4px 20px 4px 0;
+}
+.texc-pill {
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 500 12px/24px var(--font-ui);
+  letter-spacing: .01em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: filter 120ms var(--ease), background-color 120ms var(--ease);
+}
+.texc-pill-undo { background: #2a2a2a; color: #cfcfcf; }
+.texc-pill-keep { background: var(--green-btn); color: var(--green-text); }
+.texc-pill:hover { filter: brightness(1.22); }
+.texc-pill:active { filter: brightness(.92); }
+.texc-pill .texc-kbd { font-size: 11.5px; opacity: .72; font-variant-numeric: tabular-nums; }
+
+.texc-old { background: linear-gradient(var(--red-bg), var(--red-bg)), var(--bg); color: var(--syn-text); cursor: default; }
+.texc-old-line {
+  padding: 0 20px 0 4px; /* same as the code lines so wrapping matches */
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  word-break: normal;
+  tab-size: 4;
+  -moz-tab-size: 4;
+}
+.texc-old-line:empty::before { content: "\200b"; }
+.texc-old .texc-del { background: var(--red-strong); border-radius: 2px; }
+
+/* ---------------------------------------------------------------- search / replace dialog */
+.cm-s-texc .CodeMirror-dialog {
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 7px 14px;
+  font: 12.5px/1.4 var(--font-ui);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+  z-index: 15;
+}
+.cm-s-texc .CodeMirror-dialog-top { border-bottom: 1px solid var(--border); }
+.cm-s-texc .CodeMirror-dialog-bottom { border-top: 1px solid var(--border); }
+.cm-s-texc .CodeMirror-dialog label,
+.cm-s-texc .CodeMirror-search-label { color: var(--text-2); display: inline-flex; align-items: center; gap: 8px; }
+.cm-s-texc .CodeMirror-dialog input {
+  width: 24em !important;
+  height: 26px;
+  padding: 0 9px;
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: 7px;
+  color: var(--text);
+  font: 12.5px var(--font-mono);
+  outline: none;
+}
+.cm-s-texc .CodeMirror-dialog input:focus { border-color: #4a4a4a; box-shadow: 0 0 0 3px rgba(255, 255, 255, .05); }
+.cm-s-texc .CodeMirror-search-hint { color: var(--text-3) !important; font-size: 11.5px; }
+.cm-s-texc .CodeMirror-dialog button {
+  height: 24px;
+  padding: 0 10px;
+  margin-left: 2px;
+  border-radius: 6px;
+  background: var(--chip);
+  color: var(--text);
+  font: 12px var(--font-ui);
+}
+.cm-s-texc .CodeMirror-dialog button:hover { background: #333; }
+
+/* ---------------------------------------------------------------- completion list */
+.CodeMirror-hints.texc {
+  z-index: 900; /* above the docked chat, below #overlay-root */
+  min-width: 200px;
+  max-width: 560px;
+  max-height: 18em;
+  padding: 4px;
+  background: var(--elev);
+  border: 1px solid var(--border-2);
+  border-radius: 9px;
+  box-shadow: var(--shadow);
+  font: 12.5px/1.45 var(--font-mono);
+}
+.CodeMirror-hints.texc .CodeMirror-hint {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  color: var(--syn-text);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.CodeMirror-hints.texc li.CodeMirror-hint-active { background: #26364f; color: #fff; }
+.CodeMirror-hints.texc .texc-hint-main { flex: none; }
+.CodeMirror-hints.texc .texc-hint-sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #7c7c7c;
+  font: 11.5px var(--font-ui);
+}
+.CodeMirror-hints.texc li.CodeMirror-hint-active .texc-hint-sub { color: #a9b6cc; }
+
+/* ---------------------------------------------------------------- loading / empty / error */
+.texc-ed-state {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  background: var(--bg);
+  color: var(--text-3);
+  font: 13px/1.5 var(--font-ui);
+  text-align: center;
+}
+.texc-ed-state .texc-ed-err { color: #f08a8a; max-width: 460px; }
+.texc-ed-state button {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 8px;
+  background: var(--elev-2);
+  border: 1px solid var(--border-2);
+  color: var(--text);
+}
+.texc-ed-state button:hover { background: #262626; }
+.texc-spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.6px solid #333;
+  border-top-color: #9a9a9a;
+  animation: texc-spin .8s linear infinite;
+}
+@keyframes texc-spin { to { transform: rotate(360deg); } }

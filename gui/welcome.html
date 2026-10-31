@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="texc-token" content="__TEXC_TOKEN__">
+<title>texc</title>
+<link rel="stylesheet" href="/css/tokens.css">
+<link rel="stylesheet" href="/css/welcome.css">
+</head>
+<body class="wl">
+  <div id="wl-bg" class="wl-bg" aria-hidden="true"></div>
+  <div class="wl-bg-shade" aria-hidden="true"></div>
+  <button id="wl-theme" class="wl-theme-btn" type="button" title="Background image" aria-label="Background image" aria-haspopup="dialog" aria-expanded="false"></button>
+  <main id="welcome" class="wl-page">
+    <header class="wl-head">
+      <div class="wl-brand"><span id="wl-mark" class="wl-mark" aria-hidden="true"></span><h1 class="wl-title">texc</h1></div>
+      <p class="wl-sub">LaTeX on your Mac. Open a folder to start; your files stay where they are.</p>
+    </header>
+
+    <div class="wl-cols">
+      <section class="wl-col wl-start" aria-labelledby="wl-start-label">
+        <h2 id="wl-start-label" class="wl-label">Start</h2>
+        <div id="wl-start-list" class="wl-list"></div>
+        <form id="wl-path" class="wl-path" hidden autocomplete="off">
+          <label class="wl-path-label" for="wl-path-input">Folder path</label>
+          <div class="wl-path-row">
+            <input id="wl-path-input" class="wl-input" type="text" spellcheck="false" placeholder="~/Papers/thesis">
+            <button type="submit" class="wl-btn is-primary">Open</button>
+          </div>
+          <div class="wl-path-hint">No folder picker here, so type the path. <span class="wl-kbd">~</span> means your home folder.</div>
+          <div id="wl-path-error" class="wl-error" hidden></div>
+        </form>
+      </section>
+
+      <section class="wl-col wl-recent" aria-labelledby="wl-recent-label">
+        <h2 id="wl-recent-label" class="wl-label">Recent</h2>
+        <div id="wl-recent-list" class="wl-list" aria-busy="true"></div>
+      </section>
+    </div>
+
+    <footer id="wl-status" class="wl-status" aria-label="Tools"></footer>
+  </main>
+
+  <div id="wl-overlay"></div>
+
+  <script src="/js/api.js"></script>
+  <script src="/js/host.js"></script>
+  <script src="/js/icons.js"></script>
+  <script src="/js/welcome.js"></script>
+</body>
+</html>

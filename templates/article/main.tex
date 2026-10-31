@@ -1,0 +1,56 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{natbib}
+
+\title{{{title}}}
+\author{{{author}}}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+State the question, what you did, and what you found, in two or three sentences.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Start writing here. Cite a source in the sentence, as \citet{knuth1984literate}
+do, or in parentheses \citep{lamport1994latex}. Section~\ref{sec:method} shows an
+equation and a table.
+
+\section{Method}
+\label{sec:method}
+
+Equation~\eqref{eq:mean} defines the mean of $n$ observations:
+\begin{equation}
+  \bar{x} = \frac{1}{n} \sum_{i=1}^{n} x_i .
+  \label{eq:mean}
+\end{equation}
+Table~\ref{tab:symbols} lists the symbols.
+
+\begin{table}[ht]
+  \centering
+  \caption{Symbols used in Equation~\eqref{eq:mean}.}
+  \label{tab:symbols}
+  \begin{tabular}{cl}
+    \toprule
+    Symbol    & Meaning \\
+    \midrule
+    $n$       & number of observations \\
+    $x_i$     & the $i$-th observation \\
+    $\bar{x}$ & their mean \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}

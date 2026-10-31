@@ -1,0 +1,237 @@
+/* texc Welcome screen (docs/ARCHITECTURE.md).
+   Colours come from tokens.css. app.css is not loaded here, so the few shared primitives
+   (buttons, inputs, modal card) are restated with the workspace's values. WebKit-safe CSS only. */
+
+body.wl {
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: var(--fs)/1.45 var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.wl-page { max-width: 964px; margin: 0 auto; padding: 12vh 32px 48px; }   /* 900 px content (border-box) */
+
+/* ---------------------------------------------------------------- header */
+.wl-head { margin: 0 0 48px; padding: 0 10px; cursor: default; user-select: none; -webkit-user-select: none; }
+.wl-brand { display: flex; align-items: center; gap: 12px; }
+.wl-mark { flex: none; display: inline-flex; width: 36px; height: 36px; }
+.wl-title { margin: 0; color: var(--text); font-size: 28px; font-weight: 600; line-height: 1.15; letter-spacing: -.01em; }
+.wl-sub { margin: 10px 0 0; color: var(--text-2); font-size: 14px; }
+
+/* ---------------------------------------------------------------- columns */
+.wl-cols { display: grid; grid-template-columns: minmax(220px, 248px) minmax(0, 1fr); column-gap: 48px; row-gap: 32px; align-items: start; }
+.wl-col { min-width: 0; }
+.wl-label {
+  margin: 0 0 6px; padding: 0 10px; height: 24px; line-height: 24px;
+  color: var(--text-3); font-size: 12px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase;
+  cursor: default; user-select: none; -webkit-user-select: none;
+}
+.wl-list { display: flex; flex-direction: column; gap: 2px; }
+
+/* ---------------------------------------------------------------- rows (Start + Recent) */
+.wl-row {
+  position: relative; width: 100%; height: 42px; display: flex; align-items: center; gap: 12px; padding: 0 10px;
+  border-radius: 8px; color: var(--text); text-align: left; cursor: pointer; outline: none;
+  user-select: none; -webkit-user-select: none;
+}
+.wl-row:hover { background: var(--elev); }
+.wl-row:focus-visible { background: var(--elev); box-shadow: inset 0 0 0 1px var(--border-strong); }
+.wl-row-icon { flex: none; display: inline-flex; color: var(--text-2); }
+.wl-row-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wl-row-kbd { flex: none; display: inline-flex; align-items: center; gap: 6px; color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.wl-srow.is-prominent { background: var(--elev); }
+.wl-srow.is-prominent:hover { background: #222; }
+.wl-srow.is-prominent .wl-row-icon { color: var(--text); }
+
+/* Recent: icon · name · path (ellipsised in the middle) · time · × */
+.wl-rrow {
+  display: grid; grid-template-columns: 16px minmax(64px, 168px) minmax(0, 1fr) auto 24px; column-gap: 12px;
+  padding-right: 6px;
+}
+.wl-ricon { display: inline-flex; color: var(--text-3); }
+.wl-rname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.wl-rpath { min-width: 0; display: flex; overflow: hidden; white-space: nowrap; color: var(--text-3); font-size: 12.5px; }
+/* The tail (last segment) keeps its width (up to 75%); the head shrinks first. */
+.wl-ph { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wl-pt { flex: 0 0 auto; max-width: 75%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wl-rtime { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; color: var(--text-3); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.wl-rx {
+  width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px;
+  color: var(--text-3); opacity: 0; transition: opacity var(--t) var(--ease);
+}
+.wl-rrow:hover .wl-rx, .wl-rrow:focus-within .wl-rx, .wl-rrow:focus .wl-rx { opacity: 1; }
+.wl-rx:hover { color: var(--text); background: #2c2c2c; }
+.wl-rrow.is-missing .wl-ricon, .wl-rrow.is-missing .wl-rname { color: var(--text-3); }
+.wl-rrow.is-missing .wl-rpath { color: #474747; }
+.wl-rrow.is-missing .wl-rtime { color: #5a5a5a; font-style: italic; }
+.wl-rrow.is-busy .wl-rtime { color: var(--text-2); }
+body.is-opening .wl-row { cursor: progress; }
+
+.wl-empty { margin: 0; padding: 11px 10px; color: var(--text-3); line-height: 1.5; cursor: default; }
+.wl-empty.is-error { color: #fca5a5; }
+.wl-link { color: var(--text-2); text-decoration: underline; text-underline-offset: 2px; }
+.wl-link:hover { color: var(--text); }
+
+/* ---------------------------------------------------------------- typed-path fallback (no folder picker) */
+.wl-path { margin: 12px 0 0; padding: 0 10px; }
+.wl-path-label { display: block; margin-bottom: 6px; color: var(--text-2); font-size: 12px; }
+.wl-path-row { display: flex; gap: 8px; }
+.wl-path-row .wl-input { flex: 1; min-width: 0; }
+.wl-path-row .wl-btn { height: 34px; }
+.wl-path-hint { margin-top: 6px; color: var(--text-3); font-size: 11.5px; line-height: 1.45; }
+.wl-kbd { padding: 0 4px; border: 1px solid var(--border-2); border-radius: 4px; color: var(--text-2); font-family: var(--font-mono); font-size: 11px; }
+
+/* ---------------------------------------------------------------- footer status */
+.wl-status {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 32px; margin-top: 56px; padding: 14px 10px 0;
+  border-top: 1px solid var(--border); color: var(--text-3); font-size: 12px;
+  cursor: default; user-select: none; -webkit-user-select: none;
+}
+.wl-status:empty { display: none; }
+.wl-stat { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.wl-stat-name { color: var(--text-2); font-weight: 500; }
+.wl-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #4a4a4a; }
+.wl-dot.is-ok { background: var(--green); }
+.wl-dot.is-warn { background: var(--orange); }
+.wl-stat.is-warn .wl-stat-text { color: #d6a24a; }
+
+/* ---------------------------------------------------------------- buttons + inputs */
+.wl-btn {
+  height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 14px;
+  border-radius: 8px; background: var(--chip); color: var(--text); font-size: 13px; font-weight: 500; white-space: nowrap;
+}
+.wl-btn:hover:not([disabled]) { background: #303030; }
+.wl-btn:focus-visible { outline: 2px solid rgba(125, 183, 255, .6); outline-offset: 1px; }
+.wl-btn[disabled] { opacity: .5; cursor: default; }
+.wl-btn.is-primary { background: #ececec; color: #0b0b0b; }
+.wl-btn.is-primary:hover:not([disabled]) { background: #fff; }
+.wl-btn.is-sm { height: 30px; padding: 0 12px; }
+.wl-btn.is-busy, .wl-btn.is-busy[disabled] { opacity: 1; cursor: progress; }
+.wl-icon-btn { width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; color: var(--text-2); }
+.wl-icon-btn:hover { color: var(--text); background: var(--elev); }
+.wl-icon-btn:focus-visible { outline: 2px solid rgba(125, 183, 255, .6); outline-offset: 1px; }
+
+.wl-input {
+  width: 100%; height: 34px; padding: 0 10px; border: 1px solid var(--border-2); border-radius: 8px; outline: none;
+  background: #0e0e0e; color: var(--text); font-size: 13px; -webkit-appearance: none; appearance: none;
+}
+.wl-input::placeholder { color: var(--text-3); }
+.wl-input:focus { border-color: #555; box-shadow: 0 0 0 3px rgba(255, 255, 255, .06); }
+.wl-input[disabled] { opacity: .6; }
+.wl-error { margin-top: 8px; color: #f87171; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+
+.wl-spin {
+  flex: none; display: inline-block; width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, .18); border-top-color: currentColor; animation: wl-spin .8s linear infinite;
+}
+.wl-btn.is-primary .wl-spin { border-color: rgba(0, 0, 0, .18); border-top-color: #0b0b0b; }
+@keyframes wl-spin { to { transform: rotate(360deg); } }
+
+/* ---------------------------------------------------------------- New Project modal */
+.wl-scrim {
+  position: fixed; inset: 0; z-index: 100; display: flex; align-items: flex-start; justify-content: center;
+  padding: 14vh 24px 24px; overflow-y: auto; background: rgba(0, 0, 0, .55);
+}
+.wl-modal {
+  width: 480px; max-width: 100%; padding: 16px 20px 18px; outline: none;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow); color: var(--text);
+}
+.wl-modal.is-busy { cursor: progress; }
+.wl-modal-head { display: flex; align-items: center; gap: 8px; margin: 0 -8px 4px 0; }
+.wl-modal-title { flex: 1; min-width: 0; margin: 0; font-size: 15px; font-weight: 600; }
+.wl-field { display: block; margin-top: 14px; }
+.wl-field-label { display: block; margin-bottom: 6px; color: var(--text-2); font-size: 12px; cursor: default; }
+.wl-loc { display: flex; gap: 8px; }
+.wl-loc-box {
+  flex: 1; min-width: 0; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 10px;
+  border: 1px solid var(--border); border-radius: 8px; background: #0e0e0e; color: var(--text);
+}
+.wl-loc-box .wl-row-icon { color: var(--text-3); }
+.wl-loc-path { flex: 1; min-width: 0; display: flex; overflow: hidden; white-space: nowrap; }
+.wl-loc-box.is-empty { color: var(--text-3); }
+.wl-loc .wl-input { flex: 1; min-width: 0; }
+.wl-loc .wl-btn { height: 34px; }
+
+.wl-tpls { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.wl-tpl {
+  position: relative; min-height: 66px; display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  padding: 10px 30px 10px 12px; border: 1px solid var(--border-2); border-radius: 10px; background: #0e0e0e; text-align: left; outline: none;
+}
+.wl-tpl:hover { border-color: var(--border-strong); background: #121212; }
+.wl-tpl:focus-visible { box-shadow: 0 0 0 2px rgba(125, 183, 255, .5); }
+.wl-tpl[aria-checked="true"] { border-color: #8a8a8a; background: var(--elev); }
+.wl-tpl-name { color: var(--text); font-size: 13px; font-weight: 500; }
+.wl-tpl-desc { color: var(--text-3); font-size: 12px; line-height: 1.4; }
+.wl-tpl-check { position: absolute; top: 10px; right: 10px; display: inline-flex; color: var(--text); opacity: 0; }
+.wl-tpl[aria-checked="true"] .wl-tpl-check { opacity: 1; }
+
+.wl-preview { margin-top: 16px; color: var(--text-3); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.wl-preview code { color: var(--text-2); font-family: var(--font-mono); font-size: 11.5px; }
+.wl-modal-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+
+/* ---------------------------------------------------------------- toasts */
+.wl-toasts {
+  position: fixed; left: 0; right: 0; bottom: 24px; z-index: 200; display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 0 16px; pointer-events: none;
+}
+.wl-toast {
+  max-width: 560px; display: flex; align-items: center; gap: 10px; padding: 9px 8px 9px 14px; pointer-events: auto;
+  background: var(--elev-2); border: 1px solid var(--border-2); border-radius: 10px; box-shadow: var(--shadow);
+  color: var(--text); font-size: 12.5px; line-height: 1.45;
+}
+.wl-toast-icon { flex: none; display: inline-flex; color: var(--text-2); }
+.wl-toast.is-error .wl-toast-icon { color: var(--red); }
+.wl-toast.is-warn .wl-toast-icon { color: var(--orange); }
+.wl-toast-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.wl-toast-x { flex: none; width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; color: var(--text-3); }
+.wl-toast-x:hover { color: var(--text); background: #2a2a2a; }
+
+/* ---------------------------------------------------------------- narrow windows (browser mode) */
+@media (max-width: 760px) {
+  .wl-page { padding: 8vh 16px 40px; }
+  .wl-cols { grid-template-columns: minmax(0, 1fr); }
+  .wl-rrow { grid-template-columns: 16px minmax(56px, 120px) minmax(0, 1fr) auto 24px; column-gap: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wl-rx { transition: none; }
+}
+
+/* ---------------------------------------------------------------- background image (theme) */
+.wl-bg {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0;
+  background-position: center; background-size: cover; background-repeat: no-repeat;
+  transition: opacity 200ms var(--ease);
+}
+body.wl.has-bg .wl-bg { opacity: var(--wl-bg-opacity, .35); }
+.wl-bg-shade {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none; display: none;
+  background: radial-gradient(120% 90% at 30% 25%, rgba(0, 0, 0, .1), rgba(0, 0, 0, .55));
+}
+body.wl.has-bg .wl-bg-shade { display: block; }
+.wl-page { position: relative; z-index: 1; }
+/* Over an image the content sits on frosted glass, so it stays readable at any transparency. */
+body.wl.has-bg { --text-3: #8f8f8f; }
+body.wl.has-bg { padding: 9vh 0 6vh; }           /* not a margin on .wl-page: it would collapse into body and add a scrollbar */
+body.wl.has-bg .wl-page {
+  padding-top: 36px; padding-bottom: 28px; border-radius: 18px;
+  background: rgba(0, 0, 0, .42); border: 1px solid rgba(255, 255, 255, .06);
+  -webkit-backdrop-filter: blur(14px) saturate(1.1); backdrop-filter: blur(14px) saturate(1.1);
+}
+body.wl.has-bg .wl-sub, body.wl.has-bg .wl-label, body.wl.has-bg .wl-status { text-shadow: 0 1px 2px rgba(0, 0, 0, .6); }
+.wl-theme-btn {
+  position: absolute; top: 14px; right: 16px; z-index: 3; width: 32px; height: 32px; border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center; color: var(--text-3);
+}
+.wl-theme-btn:hover, .wl-theme-btn[aria-expanded="true"] { color: var(--text); background: var(--elev); }
+.wl-theme-pop {
+  position: absolute; top: 52px; right: 16px; z-index: 6; width: 284px; padding: 14px 14px 12px;
+  border-radius: 12px; background: var(--panel-2); border: 1px solid var(--border-2); box-shadow: var(--shadow);
+}
+.wl-theme-pop h3 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--text); }
+.wl-theme-actions { display: flex; gap: 8px; margin: 0 0 14px; }
+.wl-theme-row { display: flex; align-items: center; gap: 10px; color: var(--text-2); font-size: 12px; }
+.wl-theme-row input[type="range"] { flex: 1; min-width: 0; accent-color: #fff; }
+.wl-theme-val { width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
+.wl-theme-note { margin-top: 10px; color: var(--text-3); font-size: 12px; }

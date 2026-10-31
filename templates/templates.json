@@ -1,0 +1,16 @@
+[
+  {
+    "id": "blank",
+    "name": "Blank",
+    "description": "A minimal article: a title, your name and an empty page.",
+    "main": "main.tex",
+    "files": ["main.tex"]
+  },
+  {
+    "id": "article",
+    "name": "Article",
+    "description": "Abstract, two sections, an equation, a table and a BibTeX bibliography (natbib).",
+    "main": "main.tex",
+    "files": ["main.tex", "refs.bib"]
+  }
+]

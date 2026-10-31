@@ -1,0 +1,10 @@
+# Build output and caches
+__pycache__/
+*.pyc
+.texc/
+examples/**/*.pdf
+examples/**/*.synctex.gz
+.DS_Store
+
+# Compiled test helper (build it with: swiftc -O app/test/winprobe.swift -o app/test/winprobe)
+app/test/winprobe
