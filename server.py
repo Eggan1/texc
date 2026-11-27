@@ -2443,7 +2443,7 @@ class MathEngine:
             return {"available": False, "error": (self.missing or {}).get("error"),
                     "install": "python3 -m pip install --user sympy"}
 
-    def compute(self, latex: str) -> dict:
+    def compute(self, latex: str, decls=None) -> dict:
         if self.closed:
             return {"ok": False, "error": "stopping"}
         if not self.lock.acquire(timeout=self.TIMEOUT):
@@ -2453,8 +2453,11 @@ class MathEngine:
                 return {"ok": False, "available": False, "error": (self.missing or {}).get("error")}
             self.seq += 1
             rid = self.seq
+            req = {"id": rid, "latex": latex}
+            if decls:
+                req["decls"] = decls
             try:
-                self.proc.stdin.write(json.dumps({"id": rid, "latex": latex}) + "\n")
+                self.proc.stdin.write(json.dumps(req) + "\n")
                 self.proc.stdin.flush()
             except (OSError, ValueError):
                 self._kill()
@@ -3842,8 +3845,10 @@ class Handler(BaseHTTPRequestHandler):
         return self.app.math.status()
 
     def api_calc(self, q, body):
-        """The value of a LaTeX formula, for the editor's "=" suggestions: {latex} -> {ok, result}.
-        {warm: true} starts the SymPy worker ahead of time and answers like GET."""
+        """The value of a LaTeX formula, for the editor's "=" suggestions: {latex, decls?} -> {ok, result}.
+        decls: the document's distribution declarations before the "=", [{name, dist}] (the text either
+        side of each \\sim; mathcalc parses them like any formula). {warm: true} starts the SymPy
+        worker ahead of time and answers like GET."""
         if not isinstance(body, dict):
             raise ApiError(400, "Expected a JSON object.")
         if body.get("warm"):
@@ -3853,7 +3858,13 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "latex must be a non-empty string.")
         if len(latex) > 4000:
             return {"ok": True, "result": None}
-        return self.app.math.compute(latex)
+        decls = []
+        raw = body.get("decls")
+        if isinstance(raw, list):
+            for d in raw[-40:]:
+                if isinstance(d, dict) and isinstance(d.get("name"), str) and isinstance(d.get("dist"), str):
+                    decls.append({"name": d["name"][-120:], "dist": d["dist"][:300]})
+        return self.app.math.compute(latex, decls)
 
     def api_open_pdf(self, q, body):
         proj = self.app.project

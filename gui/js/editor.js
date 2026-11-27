@@ -1693,8 +1693,8 @@
   const CALC_SEP_CMDS = new Set(["le", "leq", "ge", "geq", "ne", "neq", "approx", "equiv", "sim", "simeq",
     "cong", "propto", "implies", "iff", "Rightarrow", "Leftrightarrow", "Longrightarrow", "longrightarrow",
     "Leftarrow", "mapsto", "quad", "qquad", "colon", "coloneqq", "in", "notin", "subset", "subseteq",
-    "supset", "land", "lor", "wedge", "vee", "leqslant", "geqslant", "ll", "gg", "pm", "mp", "text",
-    "nonumber", "notag"]);
+    "supset", "land", "lor", "wedge", "vee", "leqslant", "geqslant", "ll", "gg", "text",
+    "nonumber", "notag"]); // not \pm: "52 \pm 1.96 =" asks for the interval
   // after the "=", only the end of the formula may follow on the line
   const CALC_AFTER = /^\s*(?:$|\$|\\\]|\\\)|\\\\|&|%|\\end\b|\\label\b|\\tag\b|\\nonumber\b|\\notag\b|[.,;]\s*(?:$|\$|\\\]|\\\)))/;
   let calc = null; // { entry, pos, bm, card, r, spaced }
@@ -1812,8 +1812,8 @@
         i = end - 1;
         continue;
       }
-      if (c === "{" || c === "(") depth++;
-      else if ((c === "}" || c === ")") && depth > 0) depth--;
+      if (c === "{" || c === "(" || c === "[") depth++; // P[X > 1], \mathbb{E}[X \mid …] stay whole
+      else if ((c === "}" || c === ")" || c === "]") && depth > 0) depth--;
       else if (depth === 0 && "=&<>,;".includes(c)) cut = i + 1;
     }
     return src.slice(cut).trim();
@@ -1840,13 +1840,37 @@
     const lhs = calcLhs(doc.getRange(doc.posFromIndex(start), eq));
     // a bare name or number (x =, y_1 =, 2 =) has nothing to compute
     if (!lhs || lhs.length > 3000 || /^(?:[A-Za-z]|\\[A-Za-z]+)(?:_\{?\w+\}?)?$|^\d+(?:\.\d+)?$/.test(lhs)) return;
-    requestCalc(current, Pos(cur.line, cur.ch), lhs, /\s/.test(prev));
+    requestCalc(current, Pos(cur.line, cur.ch), lhs, /\s/.test(prev), calcDecls(doc, doc.indexFromPos(eq)));
   }
 
-  function requestCalc(entry, pos, lhs, spaced) {
+  // The distributions declared before the "=" (X \sim N(100, 15^2)), so P(X > 130) has a value:
+  // for each \sim, the text just before it (the name) and after it (the distribution), oldest
+  // first, so the nearest declaration wins. Commented-out ones are skipped.
+  function calcDecls(doc, upto) {
+    const text = doc.getRange(Pos(doc.firstLine(), 0), doc.posFromIndex(upto));
+    const re = /\\sim(?![A-Za-z])/g;
+    re.lastIndex = Math.max(0, text.length - 300000);
+    const out = [];
+    let m;
+    while ((m = re.exec(text))) {
+      const i = m.index;
+      const lineStart = text.lastIndexOf("\n", i) + 1;
+      if (/(^|[^\\])%/.test(text.slice(lineStart, i))) continue;
+      const name = text.slice(Math.max(lineStart, i - 60), i).replace(/^[\s\S]*(?:\$|\\\[|\\\(|\\\\|&)/, "");
+      let dist = text.slice(i + 4, i + 4 + 200);
+      // (not at \text: \text{Bin}(10, 0.3) is the distribution; mathcalc stops after it anyway)
+      const end = dist.search(/\n|\$|\\\]|\\\)|\\\\|&|;|\\(?:end|quad|qquad|label|tag)\b/);
+      if (end >= 0) dist = dist.slice(0, end);
+      if (name.trim() && dist.trim()) out.push({ name, dist });
+    }
+    return out.slice(-40);
+  }
+
+  function requestCalc(entry, pos, lhs, spaced, decls) {
     const id = ++calcSeq;
     const rev = calcRev;
-    T.api.post("/api/calc", { latex: lhs }).then((res) => {
+    const body = decls && decls.length ? { latex: lhs, decls } : { latex: lhs };
+    T.api.post("/api/calc", body).then((res) => {
       if (!res) return;
       if (res.available === false) { calcAvailable = false; return; }
       if (id !== calcSeq || rev !== calcRev || current !== entry || !cm || !res.ok || !res.result) return;
@@ -1897,7 +1921,16 @@
       note.className = "texc-calc-note";
       const m = /^assuming (.+)$/.exec(String(r.note));
       if (m) renderMath(note, "\\text{assuming }" + m[1]);
-      else note.textContent = r.note;
+      else {
+        // text with $…$ math: "$X$ normal, mean $100$, sd $15$"
+        String(r.note).split("$").forEach((part, i) => {
+          if (!part) return;
+          const span = document.createElement("span");
+          if (i % 2) renderMath(span, part);
+          else span.textContent = part;
+          note.append(span);
+        });
+      }
       card.append(note);
     }
     main.addEventListener("mousedown", (e) => { e.preventDefault(); acceptCalc(false); });

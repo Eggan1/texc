@@ -70,7 +70,7 @@ Every `/api` route needs the session token, sent as the `X-Texc-Token` header or
 | `POST /api/ai`, `/api/ai/cancel` | project | AI request streamed as SSE: `status`, `delta`, `notice`, `done`, `error` |
 | `GET /api/arxiv`, `POST /api/cite` | project | Literature search and BibTeX entries |
 | `POST /api/wordcount`, `/api/open-pdf`, `/api/clean` | project | Tools |
-| `GET /api/calc`, `POST /api/calc` | project | "=" results: status (starts the SymPy worker), or `{latex}` → `{ok, result: {latex, approx, alt, note} \| null}` |
+| `GET /api/calc`, `POST /api/calc` | project | "=" results: status (starts the SymPy worker), or `{latex, decls?}` → `{ok, result: {latex, approx, alt, note} \| null}` |
 | `GET /api/lobby`, `POST /api/lobby/new` | lobby | Welcome data (recent, templates, defaults, tools, background); create a project |
 | `GET/POST /api/lobby/background` | lobby | Welcome background image: `{data: base64}`, `{opacity}`, `{clear: true}` |
 | `GET /api/recent`, `POST /api/recent/forget` | both | Recent folders |
@@ -92,20 +92,36 @@ Every `/api` route needs the session token, sent as the `X-Texc-Token` header or
 
 - **Trigger (`editor.js`).** Typing `=` inside math (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`, or an equation/align-like
   environment) sends the left-hand side to `POST /api/calc`. That is the text after the last top-level relation, `&`,
-  `\\`, comma or `\text{}`. It fires only when the rest of the line is the end of the formula.
+  `\\`, comma or `\text{}` (brackets `( [ {` nest, and `\pm` doesn't split). It fires only when the rest of the line is
+  the end of the formula.
+- **Declarations.** The request also carries `decls`: for each `\sim` before the `=` (not in a comment, at most 40),
+  the text just before it and the text after it, oldest first. `mathcalc.py` parses them with its own tokenizer:
+  the name is the longest suffix that parses as one symbol, and the distribution comes from a fixed table. The
+  server caps the list at 40 and each part at 120/300 characters.
 - **Display.** The answer is a bookmark widget (ghost text) plus a KaTeX preview card. Nothing enters the document
   until **Tab** (exact) or **⌥Tab** (decimal) inserts it as one undo step. A rounded decimal replaces the `=` with
   `\approx`. Any edit, cursor move, blur or **Esc** dismisses it.
 - **Worker (`server.py` `MathEngine`).** `mathcalc.py --worker` is started on first use with the first of
   `$TEXC_MATH_PYTHON`, the server's Python and `/usr/bin/python3` that has SymPy.
-  - It speaks JSON lines: `{"id","latex"}` in, `{"id","ok","result"}` out.
+  - It speaks JSON lines: `{"id","latex","decls"?}` in, `{"id","ok","result"}` out.
   - One request at a time. The worker stops itself after about 4 s, and the server kills and restarts it after 6 s.
   - It stops after 20 minutes idle, and exits when its stdin closes.
 - **Without SymPy** the feature is off. Settings shows the install command.
 - **Parsing (`mathcalc.py`).** A recursive-descent parser over TeX tokens builds SymPy objects directly.
   - It reads arithmetic, `\frac`, `\sqrt`, functions, `|x|`, `\binom`, `!`, `\%` and `^\circ`.
   - Calculus: `\int` (the differential `dx` ends the integrand), `\frac{d}{dx}`, `\partial`, `\lim`, `\sum` and `\prod`.
-  - Matrices: the matrix environments, with `^{-1}`, `^T` and `\det`.
+  - Matrices: the matrix environments, with `^{-1}`, `^T` and `\det`. Tuples `(1, 2)` are vectors; `\cdot` and
+    `\times` of two vectors are the dot and cross products; `\|v\|` is a norm.
+  - Statistics: `P(event)`, `E[…]`, `Var`, `SD`, `Cov` and `Corr` read declared variables (and `Z`). The `Dist`
+    class has exact CDFs where they're finite: the normal via erf, binomial/Poisson sums up to 2000 terms,
+    exponential, uniform, geometric and integer beta. Everything else is numeric in mpmath, through a
+    continued-fraction incomplete beta (t, F, beta, large binomials) and `gammainc` (χ², large Poisson).
+    - Events become sets with `solveset` and are measured interval by interval; discrete bounds round inward.
+    - Moments come from closed forms or MGF derivatives, and E of a polynomial expands over independent variables.
+    - Critical values are upper-tail, found by bisection.
+    - `sympy.stats` isn't used: it took 48 s for a t tail.
+  - Results: statistics and ML results are decimal first, with a 4-place ⌥Tab alternative. `note` says what was
+    assumed, in text with `$…$` math.
   - Anything it can't read, or an expression already in simplest form, gets no suggestion.
 
 ## 5. Front end

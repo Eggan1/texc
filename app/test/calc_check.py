@@ -127,6 +127,79 @@ check("a runaway power gives up in time", r is None and time.time() - t1 < 4.5, 
 check("nothing is eval'd: an injection attempt is just unreadable",
       mathcalc.compute(r"\operatorname{__import__}('os')") is None and mathcalc.compute("__import__('os').system('true')") is None)
 
+# 1b. Probability, statistics and ML. Expected values are table values and closed forms
+#     (Φ(1.96) = 0.9750021049, t_{0.025,10} = 2.228138852, P(X−Y > 0) = Φ(2/3), Bin(10000, ½) summed
+#     exactly), not this module's output. Declarations are what the editor sends: the text either
+#     side of each \sim before the "=", oldest first.
+def N(name, dist):
+    return {"name": name, "dist": dist}
+
+
+STATS = [  # (input, declarations, shown, approx?, ⌥Tab alternative)
+    (r"P(Z \le 1.96)", [], "0.9750021049", True, "0.9750"),
+    (r"P(|Z| > 1.96)", [], "0.0499957903", True, "0.0500"),
+    (r"\Phi^{-1}(0.975)", [], "1.959963985", True, "1.960"),
+    (r"z_{0.025}", [], "1.959963985", True, "1.960"),
+    (r"t_{0.025,10}", [], "2.228138852", True, "2.228"),
+    (r"\chi^2_{0.05,3}", [], "7.814727903", True, "7.815"),
+    (r"F_{0.05,2,10}", [], "4.102821015", True, "4.103"),
+    (r"P(X > 130)", [N("Let X", r"N(100, 15^2)")], "0.02275013195", True, "0.0228"),
+    (r"P(X = 3)", [N("X", r"\text{Bin}(10, 0.3)")], "0.266827932", False, "0.2668"),
+    (r"P(X \le 3)", [N("X", r"B(10, 0.3)")], "0.6496107184", False, "0.6496"),
+    (r"P(X < 2.5)", [N("X", r"\text{Bin}(10, 0.3)")], "0.3827827864", False, "0.3828"),
+    (r"P(X > 2)", [N("X", r"\text{Pois}(3)")], "0.5768099189", True, "0.5768"),
+    (r"P(X > 1 \mid X > 0.5)", [N("X", r"\text{Exp}(2)")], "0.3678794412", True, "0.3679"),
+    (r"P(T > 2.3)", [N("T", "t_{10}")], "0.02212715664", True, "0.0221"),
+    (r"P(C > 7.815)", [N("C", r"\chi^2_3")], "0.04999390297", True, "0.0500"),
+    (r"P(W > 4.1)", [N("W", "F_{2,10}")], "0.05007754848", True, "0.0501"),
+    (r"P(X - Y > 0)", [N("X", "N(10, 4)"), N("Y", "N(8, 5)")], "0.7475074625", True, "0.7475"),
+    (r"P(X \le 5000)", [N("X", r"\text{Bin}(10000, 0.5)")], "0.5039893231", True, "0.5040"),
+    (r"P(X > 1)", [N("X", "N(0,1)"), N("X", r"\text{Pois}(3)")], "0.8008517265", True, "0.8009"),  # nearest wins
+    (r"\mathbb{E}[X^2]", [N("X", r"N(100, 15^2)")], "10225", False, None),
+    (r"\operatorname{Var}(2X+3)", [N("X", r"\text{Bin}(10, 0.3)")], "8.4", False, None),
+    (r"\operatorname{Var}(3X+1)", [N("X", r"N(\mu, \sigma^2)")], r"9 \sigma^{2}", False, None),
+    (r"Var(X)", [N("X", r"\text{Bin}(n, p)")], "n p (1 - p)", False, None),
+    (r"\operatorname{Var}(T)", [N("T", "t_{10}")], "1.25", False, None),
+    (r"\operatorname{mean}(2, 4, 4, 4, 5, 5, 7, 9)", [], "5", False, None),
+    (r"\operatorname{sd}(2, 4, 4, 4, 5, 5, 7, 9)", [], "2.138089935", True, "2.138"),
+    (r"\operatorname{sigmoid}(1)", [], "0.7310585786", True, "0.7311"),
+    (r"\operatorname{ReLU}(-2)", [], "0", False, None),
+    (r"\operatorname{softmax}(1, 2, 3)", [], "(0.09003057317, 0.2447284711, 0.6652409558)", True, None),
+    (r"\|(3, 4)\|", [], "5", False, None),
+    (r"(1, 2) \cdot (3, 4)", [], "11", False, None),
+    (r"(1,0,0) \times (0,1,0)", [], "(0, 0, 1)", False, None),
+    (r"52 \pm 1.96 \cdot \frac{8}{\sqrt{64}}", [], "(50.04, 53.96)", False, None),
+    (r"P(X > 1)", [N("X", "N(0,1)"), N("X, Y", r"\text{Pois}(3)")], "0.8008517265", True, "0.8009"),  # X, Y \sim …
+    (r"P(X = 300)", [N("X", r"\text{Bin}(2000, 0.123456)")], r"5.332752661 \times 10^{-5}", True, r"5.333 \times 10^{-5}"),
+    (r"\int_0^1 \operatorname{sigmoid}(x)\,dx", [], "0.620114507", True, "0.6201"),
+    (r"\int \operatorname{sigmoid}(x)\,dx", [], r"x + \ln(1 + e^{- x}) + C", False, None),
+]
+STATS_NONE = [  # still nothing: undeclared variables, events without relations, unknown functions
+    (r"P(A)", []), (r"P(X > 1)", []), (r"E[X]", []), (r"\sigma(0)", []), (r"x(1, 2)", []),
+    (r"P(2|Z| > 1)", []), (r"z_{\alpha/2}", []), (r"\|A\|", []), (r"E[e^X]", [N("X", "N(0,1)")]),
+    (r"P(X > 1)", [N("% X", "N(0,1)")]), (r"P(X > 1)", [N("__import__('os')", "N(0,1)")]),
+    (r"P(X > 1)", [N("X", "__import__('os')")]), (r"P(X > 1)", ["junk", {"name": 1, "dist": None}]),
+    # a redeclaration texc can't read blocks the old one (and the Z default); undeclared capitals block too
+    (r"P(X > 1)", [N("X", "N(0,1)"), N("X", r"\text{Gamma}(2,3)")]), (r"P(Z > 1)", [N("Z", r"\text{Gamma}(2,3)")]),
+    (r"P(Z > 1)", [N("Z", r"\mathcal{N}(0, I)")]), (r"\operatorname{Var}(X + Y)", [N("X", "N(0,1)")]),
+    (r"P(X > Y)", [N("X", "N(0,1)")]),
+]
+bad = []
+t0 = time.time()
+for src, decls, want, approx, alt in STATS:
+    r = mathcalc.compute(src, decls=decls)
+    if not r or r["latex"] != want or r["approx"] is not approx or (r["alt"] or {}).get("latex") != alt:
+        bad.append(f"{src} -> {r!r}")
+for src, decls in STATS_NONE:
+    r = mathcalc.compute(src, decls=decls)
+    if r is not None:
+        bad.append(f"{src} -> {r!r} (want nothing)")
+check(f"statistics and ML ({len(STATS) + len(STATS_NONE)} formulas)", not bad, "; ".join(bad))
+check("the statistics table runs fast", time.time() - t0 < 20, f"{time.time() - t0:.1f}s")
+r = mathcalc.compute(r"P(X > 130)", decls=[N("X", "N(100, 15)")])
+check("N(100, 15) is read as variance 15, and the note says so",
+      r and r["note"] == r"$X$ normal, mean $100$, sd $\sqrt{15}$", json.dumps(r))
+
 # 2. Worker protocol (the process server.py runs)
 w = subprocess.Popen(["/usr/bin/python3", os.path.join(TEXC, "mathcalc.py"), "--worker"], stdin=subprocess.PIPE,
                      stdout=subprocess.PIPE, text=True)
@@ -138,6 +211,10 @@ w.stdin.close()
 w.wait(5)
 check("worker: hello, answer, exit on EOF", hello.get("ready") and reply.get("id") == 7
       and (reply.get("result") or {}).get("latex") == r"\frac{1}{2}" and w.returncode == 0, json.dumps([hello, reply]))
+w = subprocess.run(["/usr/bin/python3", os.path.join(TEXC, "mathcalc.py"), "--worker"], capture_output=True, text=True, timeout=60,
+                   input=json.dumps({"id": 8, "latex": "P(X > 130)", "decls": [N("X", r"N(100, 15^2)")]}) + "\n")
+reply = json.loads(w.stdout.splitlines()[1]) if len(w.stdout.splitlines()) > 1 else {}
+check("worker: declarations come with the request", (reply.get("result") or {}).get("latex") == "0.02275013195", w.stdout[-300:])
 w = subprocess.run(["/usr/bin/python3", os.path.join(TEXC, "mathcalc.py"), "--worker"], input="", capture_output=True,
                    text=True, env=dict(os.environ, PYTHONNOUSERSITE="1"), timeout=30)
 hello = json.loads(w.stdout.splitlines()[0]) if w.stdout.strip() else {}
@@ -189,6 +266,10 @@ try:
     check("POST /api/calc computes", r.get("ok") and (r.get("result") or {}).get("latex") == "5050", json.dumps(r))
     r = api(18873, tok, "POST", "/api/calc", {"latex": "y"})
     check("POST /api/calc: nothing for a bare name", r.get("ok") and r.get("result") is None, json.dumps(r))
+    r = api(18873, tok, "POST", "/api/calc", {"latex": "P(X > 130)", "decls": [N("X", r"N(100, 15^2)"), "junk", {"name": 1}]})
+    check("POST /api/calc with declarations", r.get("ok") and (r.get("result") or {}).get("latex") == "0.02275013195", json.dumps(r))
+    r = api(18873, tok, "POST", "/api/calc", {"latex": "P(X > 130)", "decls": "not a list"})
+    check("POST /api/calc ignores malformed declarations", r.get("ok") and r.get("result") is None, json.dumps(r))
 
     # Typed for real: key events into the editor, then Tab / ⌥Tab / Escape.
     SETUP = r"""await T.app.ready; await T.app.openFile('main.tex');
@@ -199,7 +280,9 @@ window.__line = (s) => { const p = doc.posFromIndex(doc.getValue().indexOf('\\en
   doc.setCursor(at); cm.focus(); return at.line; };
 window.__get = (l) => doc.getLine(l);
 window.__state = () => ({ s: T.editor.calcSuggestion(), ghost: !!document.querySelector('.texc-calc-ghost'),
-  card: !!document.querySelector('.texc-calc-card'), focus: cm.hasFocus() });
+  card: !!document.querySelector('.texc-calc-card'), focus: cm.hasFocus(),
+  note: (document.querySelector('.texc-calc-note') || {}).innerText || null,
+  noteMath: !!document.querySelector('.texc-calc-note .katex') });
 return end > 0;"""
     steps = ["--eval", SETUP,
              # a: definite integral, Tab inserts the exact value
@@ -239,6 +322,32 @@ return end > 0;"""
              "--eval", r"window.__h = __line('\\begin{align}\n\\int_0^1 2x\\,dx &\n\\end{align}') - 1; T.editor.cm.setCursor({line: __h, ch: T.editor.cm.getLine(__h).length}); return __h;",
              "--type", "=", "--sleep", "1200",
              "--eval", "const st = __state(); T.editor.cm.execCommand('undo'); return st;",
+             # j: P(X > 130) reads "X \sim N(100, 15^2)" written before it; ⌥Tab takes the 4-place value
+             "--eval", r"window.__j = __line('Let $X \\sim N(100, 15^2)$ and $P(X > 130) $.'); T.editor.cm.setCursor({line: __j, ch: T.editor.cm.getLine(__j).lastIndexOf('$')}); return __j;",
+             "--type", "=", "--sleep", "1500",
+             "--eval", "return __state();",
+             "--shot", os.path.join(BASE, "calc-stats.png"),
+             "--key", "Alt+Tab", "--sleep", "200",
+             "--eval", "return __get(__j);",
+             # k: \Pr[…] in display math: the [ ] bracket keeps the event whole
+             "--eval", r"window.__k = __line('\\[ \\Pr[Z > 1.96] \\]'); T.editor.cm.setCursor({line: __k, ch: T.editor.cm.getLine(__k).length - 2}); return __k;",
+             "--type", "=", "--sleep", "1200",
+             "--eval", "return __state();",
+             "--key", "Escape", "--sleep", "150",
+             # l: a \pm b is an interval
+             "--eval", r"window.__l = __line('$52 \\pm 1.96 \\cdot 1 $'); T.editor.cm.setCursor({line: __l, ch: T.editor.cm.getLine(__l).length - 1}); return __l;",
+             "--type", "=", "--sleep", "1200",
+             "--eval", "return __state();",
+             "--key", "Escape", "--sleep", "150",
+             # m: a commented-out declaration doesn't count
+             "--eval", r"window.__m = __line('% $Y \\sim N(0,1)$\n$P(Y > 0) $'); T.editor.cm.setCursor({line: __m, ch: T.editor.cm.getLine(__m).length - 1}); return __m;",
+             "--type", "=", "--sleep", "1200",
+             "--eval", "return __state();",
+             # n: a distribution named with \text{…}
+             "--eval", r"window.__n = __line('$B \\sim \\text{Bin}(10, 0.3)$, so $P(B = 3) $.'); T.editor.cm.setCursor({line: __n, ch: T.editor.cm.getLine(__n).lastIndexOf('$')}); return __n;",
+             "--type", "=", "--sleep", "1200",
+             "--eval", "return __state();",
+             "--key", "Escape", "--sleep", "150",
              # i: Settings has the switch, and turning it off stops the suggestions
              "--eval", r"""T.app.openSettings(); await new Promise(r => setTimeout(r, 800));
 const sw = document.querySelector('#set-calc'); const hint = sw && sw.closest('.app-set-row').innerText;
@@ -272,10 +381,18 @@ return {exists: !!sw, hint, setting: T.state.settings.mathResults};""",
     check("typing on dismisses it and keeps what was typed", g["line"] == r"$3 \cdot 4 = 1$" and not g["st"]["ghost"]
           and not g["errors"], json.dumps(g))
     check("align: &= takes the left-hand side before the &", (ev[19].get("s") or {}).get("latex") == "1", json.dumps(ev[19]))
-    i = ev[20]
+    j = ev[21]
+    check("P(X > 130) uses the declaration X ~ N(100, 15^2) before it, and the note shows it",
+          (j.get("s") or {}).get("latex") == "0.02275013195" and "normal, mean" in (j.get("note") or "") and j.get("noteMath"), json.dumps(j))
+    check("⌥Tab inserts the 4-place value with \\approx", ev[22] == r"Let $X \sim N(100, 15^2)$ and $P(X > 130) \approx 0.0228$.", json.dumps(ev[22]))
+    check("\\Pr[…] in display math", (ev[24].get("s") or {}).get("latex") == "0.02499789515", json.dumps(ev[24]))
+    check("a \\pm b gives the interval", (ev[26].get("s") or {}).get("latex") == "(50.04, 53.96)", json.dumps(ev[26]))
+    check("a commented-out declaration doesn't count", not ev[28]["s"] and not ev[28]["ghost"], json.dumps(ev[28]))
+    check("a \\text{Bin}(10, 0.3) declaration", (ev[30].get("s") or {}).get("latex") == "0.266827932", json.dumps(ev[30]))
+    i = ev[31]
     check("Settings has the 'Results after =' switch", isinstance(i, dict) and i.get("exists") and "Results after =" in (i.get("hint") or "")
           and i.get("setting") is False, json.dumps(i))
-    check("switched off: no suggestion", not ev[21]["ghost"] and not ev[21]["s"], json.dumps(ev[21]))
+    check("switched off: no suggestion", not ev[32]["ghost"] and not ev[32]["s"], json.dumps(ev[32]))
     check("no page errors", not o["exceptions"] and not [c for c in o["console"] if c.startswith("error")],
           json.dumps(o["exceptions"] + o["console"])[:300])
 finally:

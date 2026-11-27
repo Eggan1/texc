@@ -8,7 +8,9 @@ It returns the result as LaTeX, or None when there is nothing worth showing (pla
 `f(x)` or `y`, text, or anything it can't read).
 
 `python3 mathcalc.py --worker` is the long-lived JSON-lines process the GUI server talks to:
-one {"id", "latex"} object per line in, one {"id", "ok", "result"} line out. It needs SymPy
+one {"id", "latex", "decls"?} object per line in, one {"id", "ok", "result"} line out. "decls" are
+the document's distribution declarations before the cursor ({"name": "X", "dist": "N(0, 1)"}, from
+`X \\sim N(0, 1)`), so `P(X \\le 1.96)` and `\\operatorname{Var}(2X)` have values. It needs SymPy
 (https://www.sympy.org); the rest of texc doesn't. `python3 mathcalc.py '2^{10}'` prints a result.
 Python 3.9+.
 """
@@ -69,6 +71,8 @@ UNICODE = {
     "α": ("cmd", "alpha"), "β": ("cmd", "beta"), "γ": ("cmd", "gamma"), "δ": ("cmd", "delta"),
     "ε": ("cmd", "epsilon"), "θ": ("cmd", "theta"), "λ": ("cmd", "lambda"), "μ": ("cmd", "mu"),
     "σ": ("cmd", "sigma"), "τ": ("cmd", "tau"), "φ": ("cmd", "phi"), "ω": ("cmd", "omega"),
+    "≤": ("cmd", "le"), "≥": ("cmd", "ge"), "≠": ("cmd", "ne"), "±": ("cmd", "pm"), "∓": ("cmd", "mp"),
+    "Φ": ("cmd", "Phi"), "χ": ("cmd", "chi"), "∣": ("cmd", "mid"), "‖": ("cmd", "|"),
 }
 # Spacing and sizing that don't change the math.
 SKIP = {
@@ -81,7 +85,8 @@ SKIP = {
 }
 SKIP_WITH_ARG = {"label", "tag", "hspace", "vspace", "phantom", "hphantom", "vphantom", "color"}
 ALIASES = {
-    "lvert": ("sym", "|"), "rvert": ("sym", "|"), "vert": ("sym", "|"), "mid": ("sym", "|"),
+    "lvert": ("sym", "|"), "rvert": ("sym", "|"), "vert": ("sym", "|"), "mid": ("cmd", "mid"),
+    "Vert": ("cmd", "|"), "lVert": ("cmd", "|"), "rVert": ("cmd", "|"), "lt": ("sym", "<"), "gt": ("sym", ">"),
     "lbrace": ("cmd", "{"), "rbrace": ("cmd", "}"), "lbrack": ("sym", "["), "rbrack": ("sym", "]"),
     "cdotp": ("cmd", "cdot"), "dfrac": ("cmd", "frac"), "tfrac": ("cmd", "frac"),
     "cfrac": ("cmd", "frac"), "dbinom": ("cmd", "binom"), "tbinom": ("cmd", "binom"),
@@ -217,6 +222,37 @@ FACTOR_CMDS = (set(FUNCS) | GREEK | set(MULTI) | DECORATIONS | ROMAN | {
 } | TEXT)
 
 
+# Probability, statistics and ML: names that take an argument in brackets.
+STAT_WORDS = {
+    "P": "prob", "Pr": "prob", "Prob": "prob", "E": "expect",
+    "Var": "var", "var": "var", "Variance": "var", "V": "var", "SD": "sd", "sd": "sd", "Std": "sd",
+    "std": "sd", "stdev": "sd", "Cov": "cov", "cov": "cov", "Corr": "corr", "corr": "corr", "Cor": "corr",
+    "mean": "mean", "Mean": "mean", "avg": "mean", "median": "median", "Median": "median",
+    "mode": "mode", "Mode": "mode",
+    "sigmoid": "sigmoid", "Sigmoid": "sigmoid", "logistic": "sigmoid", "ReLU": "relu", "relu": "relu",
+    "ReLu": "relu", "softmax": "softmax", "Softmax": "softmax", "softplus": "softplus",
+    "Softplus": "softplus", "logit": "logit",
+}
+# Spelled with plain letters (Var(X), mean(1, 2, 3)): only these, and only right before a bracket.
+LETTER_WORDS = {w for w in STAT_WORDS if len(w) > 1 and w not in ("Prob", "Variance")}
+ML_OPS = {"sigmoid", "relu", "softplus", "logit", "softmax"}
+DATA_OPS = {"mean", "median", "mode"}
+REL_CMDS = {"le": "le", "leq": "le", "leqslant": "le", "leqq": "le", "ge": "ge", "geq": "ge",
+            "geqslant": "ge", "geqq": "ge", "ne": "ne", "neq": "ne"}
+# Distribution names after \sim: N(0, 1), \mathcal{N}, \text{Bin}(10, 0.3), t_{10}, \chi^2_3, F_{2,10} …
+DIST_WORDS = {
+    "normal": "normal", "gaussian": "normal", "gauss": "normal", "bin": "binomial", "binom": "binomial",
+    "binomial": "binomial", "po": "poisson", "poi": "poisson", "pois": "poisson", "poisson": "poisson",
+    "exp": "exponential", "expo": "exponential", "exponential": "exponential", "unif": "uniform",
+    "uniform": "uniform", "ber": "bernoulli", "bern": "bernoulli", "bernoulli": "bernoulli",
+    "geo": "geometric", "geom": "geometric", "geometric": "geometric", "beta": "beta", "student": "t",
+}
+DIST_LETTERS = {"N": "normal", "B": "binomial", "U": "uniform", "F": "f", "t": "t"}
+DIST_ARITY = {"normal": 2, "binomial": 2, "poisson": 1, "exponential": 1, "uniform": 2, "bernoulli": 1,
+              "geometric": 1, "t": 1, "chi2": 1, "f": 2, "beta": 2}
+MAX_DECLS = 40
+
+
 class Frame:
     __slots__ = ("kind", "var", "closed")
 
@@ -225,7 +261,7 @@ class Frame:
 
 
 class Parser:
-    def __init__(self, toks):
+    def __init__(self, toks, decls=None):
         self.t = toks
         self.i = 0
         self.frames = []           # open integrals (their differential ends them) and groups
@@ -233,8 +269,22 @@ class Parser:
         self.abs_depth = 0
         self.limit_point = 0
         self.limit_dir = None
-        self.flags = set()         # decimal, calculus, indefinite, matrix-op, huge
+        self.flags = set()         # decimal, calculus, indefinite, matrix-op, huge, stats, numeric
         self.env = None            # the matrix environment of the input, for the output
+        self.decls = decls or {}   # random variables declared in the document: name -> Dist
+        self.rv_mode = 0           # inside P(…), E[…], Var(…): declared names are random variables
+        self.event_depth = 0       # inside P(…): a bare | after an operand is "given"
+        self.norm_depth = 0        # inside \| … \|
+        self.used = {}             # the random variables read so far: name -> Dist
+        self.notes = []            # what the result assumes, shown under it
+        self.pm = None             # a \pm b at the top level: (a, b)
+
+    def note(self, text):
+        if text not in self.notes:
+            self.notes.append(text)
+
+    def at_bracket(self, k=0):
+        return self.at("sym", "(", k) or self.at("sym", "[", k)
 
     # -- token helpers
     def peek(self, k=0):
@@ -284,6 +334,9 @@ class Parser:
     # -- entry
     def parse(self):
         e = self.expr()
+        if self.at("cmd", "pm") or self.at("cmd", "mp"):        # 52 \pm 1.96: an interval
+            self.next()
+            self.pm = (e, self.expr())
         if self.peek().kind != "end":
             raise ParseError(f"unexpected {self.peek()}")
         return e
@@ -303,12 +356,12 @@ class Parser:
         node = self.term()
         while not self.closed(frame):
             tk = self.peek()
-            if tk.is_("sym", "+"):
+            if tk.is_("sym", "+") or tk.is_("sym", "-"):
                 self.next()
-                node = node + self.term()
-            elif tk.is_("sym", "-"):
-                self.next()
-                node = node - self.term()
+                rhs = self.term()
+                if isinstance(node, sp.MatrixBase) or isinstance(rhs, sp.MatrixBase):
+                    self.flags.add("matrix-op")
+                node = node + rhs if tk.val == "+" else node - rhs
             else:
                 break
         return node
@@ -320,7 +373,17 @@ class Parser:
             tk = self.peek()
             if tk.is_("sym", "*") or (tk.kind == "cmd" and tk.val in ("cdot", "times", "ast")):
                 self.next()
-                node = self.mul(node, self.unary())
+                rhs = self.unary()
+                u, v = _vector(node), _vector(rhs)
+                if u is not None and v is not None and len(u) == len(v):
+                    self.flags.add("matrix-op")
+                    if tk.val == "cdot":                 # u · v of two vectors: the dot product
+                        node = sum((a * b for a, b in zip(u, v)), sp.Integer(0))
+                        continue
+                    if tk.val == "times" and len(u) == 3:   # u × v: the cross product
+                        node = sp.Matrix(u).cross(sp.Matrix(v))
+                        continue
+                node = self.mul(node, rhs)
             elif tk.is_("sym", "/") or tk.is_("cmd", "div"):
                 self.next()
                 rhs = self.unary()
@@ -347,8 +410,10 @@ class Parser:
         if tk.kind in ("num", "let"):
             return True
         if tk.kind == "sym":
-            return tk.val in "([{" or (tk.val == "|" and self.abs_depth == 0)
-        return tk.kind == "cmd" and tk.val in FACTOR_CMDS
+            return tk.val in "([{" or (tk.val == "|" and self.abs_depth == 0 and not self.event_depth)
+        if tk.is_("cmd", "|"):
+            return not self.norm_depth
+        return tk.kind == "cmd" and (tk.val in FACTOR_CMDS or tk.val == "Pr")
 
     def unary(self):
         if self.at("sym", "-"):
@@ -367,7 +432,7 @@ class Parser:
                 base = self.superscript(base)
                 if self.at("sym", "^"):
                     raise ParseError("double superscript")
-            elif tk.is_("sym", "!"):
+            elif tk.is_("sym", "!") and not self.at("sym", "=", 1):
                 self.next()
                 if self.at("sym", "!"):
                     self.next()
@@ -492,9 +557,466 @@ class Parser:
         if not applied_ok and (self.at("sym", "(") or self.at("sym", "[")):
             closer = ")" if self.at("sym", "(") else "]"
             single = self.peek(1).kind in ("let", "num") or (self.peek(1).kind == "cmd" and self.peek(1).val in GREEK)
-            if name in FUNCNAMES or name in GREEK or name.startswith("\\") or (single and self.at("sym", closer, 2)):
+            if name in FUNCNAMES or name in GREEK or name.startswith("\\") or (single and self.at("sym", closer, 2)) \
+                    or self.comma_ahead():
                 raise Refuse(f"{name}(...) reads as a function")
+        if self.rv_mode:
+            if sym_name in self.decls and self.decls[sym_name] is None:
+                raise Refuse(f"{sym_name} is declared with a distribution texc doesn't know")
+            if sym_name in self.decls or sym_name == "Z":
+                self.use_rv(sym_name)
+            elif re.match(r"(?:\\[A-Za-z]+\{)?[A-Z]", sym_name):
+                raise Refuse(f"{sym_name} looks like a random variable but has no declaration")
         return sp.Symbol(sym_name)
+
+    def comma_ahead(self):
+        """The bracket at the cursor holds a top-level comma: x(1, 2) is a function call, not x·(1, 2)."""
+        depth, k = 0, 0
+        while True:
+            tk = self.peek(k)
+            if tk.kind == "end":
+                return False
+            if tk.kind == "sym" and tk.val in "([{":
+                depth += 1
+            elif tk.kind == "sym" and tk.val in ")]}":
+                depth -= 1
+                if depth == 0:
+                    return False
+            elif depth == 1 and tk.is_("sym", ","):
+                return True
+            k += 1
+
+    def use_rv(self, name):
+        if name not in self.used:
+            dist = self.decls.get(name)
+            if dist is None:                                  # Z: the standard normal, by convention
+                dist = Dist("normal", [sp.Integer(0), sp.Integer(1)])
+                self.note("$Z$ standard normal")
+            else:
+                self.note(dist.describe(name))
+            self.used[name] = dist
+
+    # -- probability, statistics, ML
+    def letter_word(self):
+        """Var(X), mean(1, 2, 3), ReLU(-2): a known word in plain letters, right before a bracket."""
+        start = self.i - 1
+        letters, k = [], start
+        while k < len(self.t) and self.t[k].kind == "let" and len(letters) < 8:
+            letters.append(self.t[k].val)
+            k += 1
+        for n in range(len(letters), 1, -1):
+            w = "".join(letters[:n])
+            if w in LETTER_WORDS and self.at_bracket(start + n - self.i):
+                self.i = start + n
+                return w
+        return None
+
+    def comma_exprs(self, closer_kind, closer_val):
+        self.frames.append(Frame("group"))
+        try:
+            items = [self.expr()]
+            while self.at("sym", ","):
+                self.next()
+                items.append(self.expr())
+        finally:
+            self.frames.pop()
+        self.expect(closer_kind, closer_val)
+        return items
+
+    def paren(self):
+        """(…), or a tuple (1, 2, 3), which is a vector."""
+        items = self.comma_exprs("sym", ")")
+        if len(items) == 1:
+            return items[0]
+        if any(isinstance(x, sp.MatrixBase) for x in items):
+            raise ParseError("a tuple of matrices")
+        if self.env is None:
+            self.env = "tuple"
+        return sp.Matrix(items)
+
+    def skip_param_name(self):
+        """n = 10 or p{=}0.3 inside a distribution's brackets: skip the name."""
+        depth, k = 0, 0
+        while k < 12:
+            tk = self.peek(k)
+            if tk.kind == "end":
+                return
+            if tk.is_("sym", "{") and self.at("sym", "=", k + 1) and self.at("sym", "}", k + 2) and depth == 0:
+                self.i += k + 3
+                return
+            if tk.kind == "sym" and tk.val in "([{":
+                depth += 1
+            elif tk.kind == "sym" and tk.val in ")]}":
+                if depth == 0:
+                    return
+                depth -= 1
+            elif depth == 0 and tk.is_("sym", ","):
+                return
+            elif depth == 0 and tk.is_("sym", "="):
+                self.i += k + 1
+                return
+            k += 1
+
+    def arg_list(self, rv=False, named=False):
+        """(a, b, …) or [a, b, …]."""
+        opener = self.next()
+        if not (opener.is_("sym", "(") or opener.is_("sym", "[")):
+            raise ParseError("expected a bracket")
+        closer = ")" if opener.val == "(" else "]"
+        args = []
+        self.frames.append(Frame("group"))
+        self.rv_mode += rv
+        try:
+            while True:
+                if named:
+                    self.skip_param_name()
+                args.append(self.expr())
+                if self.at("sym", ","):
+                    self.next()
+                    continue
+                break
+        finally:
+            self.frames.pop()
+            self.rv_mode -= rv
+        self.expect("sym", closer)
+        return args
+
+    def named_op(self, word):
+        op = STAT_WORDS[word]
+        if op == "prob":
+            return self.probability()
+        if op == "expect":
+            return self.expectation()
+        if op in ML_OPS:
+            return self.ml_op(op)
+        args = self.arg_list(rv=True)
+        if op in DATA_OPS:
+            return self.data_op(op, args)
+        return self.moment_op(op, args)
+
+    def probability(self):
+        """P(event), P(A | B), \\Pr[…]: from the distributions declared in the document."""
+        closer = ")" if self.next().val == "(" else "]"
+        self.frames.append(Frame("group"))
+        self.rv_mode += 1
+        self.event_depth += 1
+        try:
+            ev = self.event()
+            given = None
+            if self.at("sym", "|") or self.at("cmd", "mid"):
+                self.next()
+                given = self.event()
+        finally:
+            self.frames.pop()
+            self.rv_mode -= 1
+            self.event_depth -= 1
+        self.expect("sym", closer)
+        self.flags.add("stats")
+        return prob_value(ev, given, self)
+
+    def event(self):
+        e = self.relation_chain()
+        while True:
+            if self.at("sym", ",") or self.at("cmd", "cap") or self.at("cmd", "land") or self.at("cmd", "wedge"):
+                self.next()
+                e = sp.And(e, self.relation_chain())
+            elif self.at("cmd", "cup") or self.at("cmd", "lor") or self.at("cmd", "vee"):
+                self.next()
+                e = sp.Or(e, self.relation_chain())
+            else:
+                return e
+
+    def relation_chain(self):
+        """a < X \\le b: one or more relations."""
+        a = self.expr()
+        rels = []
+        while True:
+            op = self.rel_op()
+            if op is None:
+                break
+            b = self.expr()
+            rels.append(_relation(op, a, b))
+            a = b
+        if not rels:
+            raise Refuse("an event needs a relation (P(A) names an event, not a value)")
+        return sp.And(*rels) if len(rels) > 1 else rels[0]
+
+    def rel_op(self):
+        tk = self.peek()
+        if tk.kind == "sym" and tk.val in "<>":
+            self.next()
+            if self.at("sym", "="):
+                self.next()
+                return "le" if tk.val == "<" else "ge"
+            return "lt" if tk.val == "<" else "gt"
+        if tk.is_("sym", "="):
+            self.next()
+            if self.at("sym", "="):
+                self.next()
+            return "eq"
+        if tk.is_("sym", "!") and self.at("sym", "=", 1):
+            self.i += 2
+            return "ne"
+        if tk.kind == "cmd" and tk.val in REL_CMDS:
+            self.next()
+            return REL_CMDS[tk.val]
+        return None
+
+    def expectation(self):
+        closer = ")" if self.next().val == "(" else "]"
+        self.frames.append(Frame("group"))
+        self.rv_mode += 1
+        try:
+            g = self.expr()
+        finally:
+            self.frames.pop()
+            self.rv_mode -= 1
+        self.expect("sym", closer)
+        self.flags.add("stats")
+        return expect_value(g, self)
+
+    def rv_names(self, e):
+        free = getattr(e, "free_symbols", set())
+        return [n for n in self.used if sp.Symbol(n) in free]
+
+    def moment_op(self, op, args):
+        if not any(self.rv_names(a) for a in args):
+            if op in ("var", "sd") and len(args) >= 2:
+                return self.data_op(op, args)                # Var(2, 4, 4, 5): the data's variance
+            raise Refuse(f"{op} of something that isn't a declared random variable")
+        self.flags.add("stats")
+        if op in ("var", "sd"):
+            if len(args) != 1:
+                raise ParseError(f"{op} takes one argument")
+            v = variance_value(args[0], self)
+            return v if op == "var" else sp.sqrt(v)
+        if len(args) != 2:
+            raise ParseError(f"{op} takes two arguments")
+        c = expect_value(sp.expand(args[0] * args[1]), self) - expect_value(args[0], self) * expect_value(args[1], self)
+        if op == "cov":
+            return c
+        return c / sp.sqrt(variance_value(args[0], self) * variance_value(args[1], self))
+
+    def data_op(self, op, args):
+        """mean, median, mode, and the sample variance and sd (n − 1) of a list of numbers."""
+        vals = []
+        for a in args:
+            vals.extend(list(a) if isinstance(a, sp.MatrixBase) else [a])
+        vals = [sp.sympify(v) for v in vals]
+        if not vals or not all(v.is_number and v.is_real for v in vals):
+            raise Refuse("data must be numbers")
+        n = len(vals)
+        self.flags.add("stats")
+        if op == "mean":
+            return sp.Add(*vals) / n
+        if op == "median":
+            s = sorted(vals, key=lambda v: sp.N(v, 30))
+            return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+        if op == "mode":
+            counts = Counter(vals)
+            top = max(counts.values())
+            modes = [v for v, c in counts.items() if c == top]
+            if top == 1 or len(modes) != 1:
+                raise Refuse("no single mode")
+            return modes[0]
+        if n < 2:
+            raise Refuse("a sample variance needs two numbers")
+        m = sp.Add(*vals) / n
+        var = sp.Add(*[(v - m) ** 2 for v in vals]) / (n - 1)
+        self.note("sample variance (divides by $n-1$)" if op == "var" else "sample sd (divides by $n-1$)")
+        return var if op == "var" else sp.sqrt(var)
+
+    def ml_op(self, op):
+        args = self.arg_list()
+        self.flags.add("numeric")
+        if op == "softmax":
+            vals = []
+            for a in args:
+                vals.extend(list(a) if isinstance(a, sp.MatrixBase) else [a])
+            if len(vals) < 2:
+                raise ParseError("softmax of one number")
+            ex = [sp.exp(v) for v in vals]
+            total = sp.Add(*ex)
+            shape = args[0].shape if len(args) == 1 and isinstance(args[0], sp.MatrixBase) else (len(vals), 1)
+            if len(args) > 1 and self.env is None:
+                self.env = "tuple"
+            self.flags.add("matrix-op")
+            return sp.Matrix(shape[0], shape[1], [e / total for e in ex])
+        if len(args) != 1:
+            raise ParseError(f"{op} takes one argument")
+        f = {"sigmoid": lambda v: 1 / (1 + sp.exp(-v)), "relu": lambda v: sp.Max(0, v),
+             "softplus": lambda v: sp.log(1 + sp.exp(v)), "logit": lambda v: sp.log(v / (1 - v))}[op]
+        x = args[0]
+        if isinstance(x, sp.MatrixBase):
+            self.flags.add("matrix-op")
+            return x.applyfunc(f)
+        return f(x)
+
+    def norm(self):
+        """\\|v\\|, \\|v\\|_1, \\|v\\|_\\infty (Frobenius for a matrix unless a subscript says otherwise)."""
+        self.norm_depth += 1
+        try:
+            items = self.comma_exprs("cmd", "|")
+        finally:
+            self.norm_depth -= 1
+        v = items[0] if len(items) == 1 else sp.Matrix(items)
+        order = None
+        if self.at("sym", "_"):
+            self.next()
+            o = self.script()
+            if o == sp.oo:
+                order = sp.oo
+            elif o in (1, 2):
+                order = int(o)
+            else:
+                raise ParseError("unsupported norm")
+        self.flags.add("matrix-op")
+        if isinstance(v, sp.MatrixBase):
+            return v.norm() if order is None else v.norm(order)
+        if not getattr(v, "is_number", False):
+            raise Refuse("the norm of a name")                 # \|A\|: A is a matrix we don't know
+        return sp.Abs(v)
+
+    def phi(self):
+        """\\Phi(1.96) and \\Phi^{-1}(0.975): the standard normal CDF and its inverse."""
+        save = self.i
+        inverse = False
+        if self.at("sym", "^"):
+            self.next()
+            if self.script() != -1:
+                self.i = save
+                return None
+            inverse = True
+        if not self.at_bracket():
+            self.i = save
+            return None
+        x = sp.sympify(self.function_arg())
+        if not (x.is_number and x.is_real):
+            raise Refuse("\\Phi of a symbol")
+        self.flags.add("stats")
+        if inverse:
+            if not (0 < x < 1):
+                raise Refuse("\\Phi^{-1} needs 0 < p < 1")
+            return sp.sqrt(2) * sp.erfinv(2 * x - 1)
+        return (1 + sp.erf(x / sp.sqrt(2))) / 2
+
+    def num_subscript(self):
+        """At "_": a subscript of plain numbers, _{0.05, 3} or _5, as Rationals (consumed); else None."""
+        if not self.at("sym", "_"):
+            return None
+        if self.peek(1).kind == "num":
+            if len(self.peek(1).val) > 1 and "." not in self.peek(1).val:
+                return None                                   # z_05 is z_0 5 to TeX
+            vals, n = [self.peek(1).val], 2
+        elif self.at("sym", "{", 1):
+            vals, k = [], 2
+            while True:
+                if self.peek(k).kind != "num":
+                    return None
+                vals.append(self.peek(k).val)
+                k += 1
+                if self.at("sym", ",", k):
+                    k += 1
+                    continue
+                if self.at("sym", "}", k):
+                    k += 1
+                    break
+                return None
+            n = k
+        else:
+            return None
+        self.i += n
+        return [sp.Rational(v) for v in vals]
+
+    def critical(self, v):
+        """z_{0.025}, t_{0.025, 10}, \\chi^2_{0.05, 3}, F_{0.05, 2, 10}: upper-tail critical values."""
+        if v not in ("z", "t", "F", "chi"):
+            return None
+        save = self.i
+        squared = v != "chi"
+        nums = None
+        for _ in range(2):
+            if not squared and self.at("sym", "^"):
+                if self.at("num", "2", 1):
+                    self.i += 2
+                elif self.at("sym", "{", 1) and self.at("num", "2", 2) and self.at("sym", "}", 3):
+                    self.i += 4
+                else:
+                    break
+                squared = True
+            elif nums is None and self.at("sym", "_"):
+                nums = self.num_subscript()
+                if nums is None:
+                    break
+            else:
+                break
+        want = {"z": 1, "t": 2, "chi": 2, "F": 3}[v]
+        alpha = [j for j, x in enumerate(nums or []) if 0 < x < 1]
+        if not squared or nums is None or len(nums) != want or len(alpha) != 1:
+            self.i = save
+            return None
+        a = nums[alpha[0]]
+        dfs = [x for j, x in enumerate(nums) if j != alpha[0]]
+        if any(d <= 0 for d in dfs):
+            self.i = save
+            return None
+        self.flags.add("stats")
+        df = f", ${'$ and $'.join(_nice(d) for d in dfs)}$ df" if dfs else ""
+        self.note(f"upper-tail area ${_nice(a)}${df}")
+        if v == "z":
+            return sp.sqrt(2) * sp.erfinv(1 - 2 * a)
+        return Dist({"t": "t", "chi": "chi2", "F": "f"}[v], dfs).upper_quantile(a)
+
+    def dist_spec(self):
+        """After \\sim: N(0, 1), \\mathcal{N}(\\mu, \\sigma^2), \\text{Bin}(10, 0.3), t_{10}, \\chi^2_3, F_{2,10} …"""
+        tk = self.next()
+        if tk.kind == "let":
+            letters = [tk.val]
+            while self.peek().kind == "let" and len(letters) < 12:
+                letters.append(self.next().val)
+            word = "".join(letters)
+        elif tk.kind == "cmd" and tk.val in DECORATIONS | ROMAN | TEXT:
+            word = self.raw_group().replace(" ", "")
+        elif tk.kind == "cmd" and tk.val in ("chi", "exp"):
+            word = tk.val
+        else:
+            raise ParseError("not a distribution")
+        if word == "chi":
+            kind = "chi2"
+        elif len(word) == 1:
+            kind = DIST_LETTERS.get(word)
+        else:
+            kind = DIST_WORDS.get(word.lower())
+        if kind is None:
+            raise ParseError(f"unknown distribution {word}")
+        squared = kind != "chi2"
+        params = None
+        for _ in range(2):
+            if not squared and self.at("sym", "^"):
+                self.next()
+                if self.script() != 2:
+                    raise ParseError("chi needs ^2")
+                squared = True
+            elif params is None and kind in ("t", "chi2", "f") and self.at("sym", "_"):
+                self.next()
+                if self.at("sym", "{"):
+                    self.next()
+                    params = self.comma_exprs("sym", "}")
+                else:
+                    params = [self.script()]
+            else:
+                break
+        if not squared:
+            raise ParseError("chi needs ^2")
+        if params is None:
+            if not self.at_bracket():
+                raise ParseError("a distribution needs its parameters")
+            params = self.arg_list(named=True)
+        if len(params) != DIST_ARITY[kind] or any(isinstance(x, sp.MatrixBase) for x in params):
+            raise ParseError("wrong number of parameters")
+        if any(re.match(r"(?:\\[A-Za-z]+\{)?[A-Z]", s_.name) for x in params for s_ in sp.sympify(x).free_symbols):
+            raise ParseError("a capital parameter (N(0, I), N(\\mu, \\Sigma)) is a matrix or a variable")
+        return Dist(kind, params)
 
     def differential(self):
         """At a 'd' (or \\mathrm{d}) inside an integral: dx closes the innermost open integral."""
@@ -521,6 +1043,15 @@ class Parser:
                 raise ParseError("digits after a one-digit script")
             return self.number(v)
         if k == "let":
+            if not script:
+                w = self.letter_word()
+                if w is not None:
+                    return self.named_op(w)
+                if v in ("P", "E") and self.at_bracket():
+                    return self.named_op(v)
+                c = self.critical(v)
+                if c is not None:
+                    return c
             if v == "d" and not script:
                 d = self.differential()
                 if d is not None:
@@ -532,7 +1063,7 @@ class Parser:
             return self.symbol(v)
         if k == "sym":
             if v == "(":
-                return self.grouped("sym", ")")
+                return self.paren()
             if v == "[":
                 return self.grouped("sym", "]")
             if v == "{":
@@ -555,6 +1086,20 @@ class Parser:
             raise ParseError("unexpected end")
         if v == "{":
             return self.grouped("cmd", "}")
+        if v == "Pr":
+            if not self.at_bracket():
+                raise ParseError("\\Pr needs a bracket")
+            return self.named_op("Pr")
+        if v == "|":
+            return self.norm()
+        if v == "chi" and not script:
+            c = self.critical("chi")
+            if c is not None:
+                return c
+        if v == "Phi":
+            c = self.phi()
+            if c is not None:
+                return c
         if v == "frac":
             return self.frac()
         if v == "sqrt":
@@ -605,9 +1150,18 @@ class Parser:
             return self.symbol(v)
         if v in DECORATIONS:
             inner = self.raw_group()
+            if inner.replace(" ", "") in STAT_WORDS and self.at_bracket():     # \mathbb{E}[X], \mathbb{P}(…)
+                return self.named_op(inner.replace(" ", ""))
             return self.symbol(f"\\{v}{{{inner}}}")
+        if v in TEXT:
+            name = self.raw_group().replace(" ", "")
+            if name in STAT_WORDS and self.at_bracket():                     # \text{Var}(X)
+                return self.named_op(name)
+            raise ParseError("text in math")
         if v in ROMAN:
             name = self.raw_group().replace(" ", "")
+            if name in STAT_WORDS and self.at_bracket():                     # \operatorname{Var}(X)
+                return self.named_op(name)
             if v == "operatorname":
                 if name in MULTI:
                     return self.multi(MULTI[name])
@@ -972,6 +1526,563 @@ class Parser:
 
 
 # ---------------------------------------------------------------------------------------------
+# Probability and statistics
+# ---------------------------------------------------------------------------------------------
+
+STAT_EXACT = 2000              # exact sums up to this many terms; bigger discrete laws go numeric
+EXACT_DIGITS = 2500            # ... and while the exact rationals stay under about this many digits
+
+
+def _small(x, power):
+    """x^power stays a modest exact rational (0.3^2000 does; 0.123456^2000 doesn't)."""
+    import math
+    x = sp.sympify(x)
+    return bool(x.is_Rational) and power * math.log10(max(int(x.q), 2)) <= EXACT_DIGITS
+
+
+def _mpmath():
+    import mpmath
+    return mpmath.mp
+
+
+def _mpf(x):
+    return _mpmath().mpf(str(sp.N(x, 40)))
+
+
+def _mp_float(fn):
+    mp = _mpmath()
+    with mp.workdps(40):
+        return sp.Float(mp.nstr(fn(mp), 35), 35)
+
+
+def _betainc(mp, a, b, x):
+    """The regularized incomplete beta I_x(a, b), by its continued fraction (Numerical Recipes
+    betacf). Unlike mpmath's betainc it converges for large a and b (a binomial with n = 10^6)."""
+    if x <= 0:
+        return mp.mpf(0)
+    if x >= 1:
+        return mp.mpf(1)
+    if x > (a + 1) / (a + b + 2):
+        return 1 - _betainc(mp, b, a, 1 - x)
+    tiny = mp.mpf(10) ** (-(mp.dps + 30))
+    qab, qap, qam = a + b, a + 1, a - 1
+    c, d = mp.mpf(1), 1 - qab * x / qap
+    d = 1 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 200000):
+        m2 = 2 * m
+        for aa in (m * (b - m) * x / ((qam + m2) * (a + m2)), -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))):
+            d = 1 + aa * d
+            d = 1 / (d if abs(d) > tiny else tiny)
+            c = 1 + aa / c
+            c = c if abs(c) > tiny else tiny
+            h *= d * c
+        if abs(d * c - 1) < mp.eps * 4:
+            break
+    front = mp.exp(mp.loggamma(a + b) - mp.loggamma(a) - mp.loggamma(b) + a * mp.log(x) + b * mp.log(1 - x))
+    return front * h / a
+
+
+def _t_cdf(mp, x, nu):
+    if x == 0:
+        return mp.mpf(1) / 2
+    tail = _betainc(mp, nu / 2, mp.mpf(1) / 2, nu / (nu + x * x)) / 2
+    return 1 - tail if x > 0 else tail
+
+
+def _truth(rel):
+    if rel in (sp.true, True):
+        return True
+    if rel in (sp.false, False):
+        return False
+    raise Refuse("can't tell where the bound lies")
+
+
+def _nice(x):
+    """A parameter for a note: 0.3 rather than 3/10."""
+    x = sp.sympify(x)
+    if x.is_Rational:
+        d = _rational_decimal(x)
+        if d is not None and len(d) <= 12:
+            return d
+    return to_latex(x)
+
+
+def _vector(m):
+    if isinstance(m, sp.MatrixBase) and 1 in m.shape:
+        return list(m)
+    return None
+
+
+def _relation(op, a, b):
+    if isinstance(a, sp.MatrixBase) or isinstance(b, sp.MatrixBase):
+        raise ParseError("a relation between matrices")
+    return {"lt": sp.Lt, "le": sp.Le, "gt": sp.Gt, "ge": sp.Ge, "eq": sp.Eq, "ne": sp.Ne}[op](a, b)
+
+
+class Dist:
+    """A distribution declared in the document (X \\sim N(0, 1)): its CDF, moments and quantiles.
+
+    Conventions (each shown in the result's note): N(mean, variance), Exp(rate), Geom(p) counts
+    trials 1, 2, …, U(a, b) is continuous."""
+
+    DISCRETE = {"binomial", "poisson", "bernoulli", "geometric"}
+    SCALE = {"normal": [1], "poisson": [0], "exponential": [0], "t": [0], "chi2": [0], "f": [0, 1], "beta": [0, 1]}
+
+    def __init__(self, kind, params, check=True):
+        self.kind = kind
+        params = [sp.sympify(a) for a in params]
+        self.pos_map = {}                       # σ in N(μ, σ²) is positive, so sd = σ
+        for j in self.SCALE.get(kind, []):
+            for s_ in params[j].free_symbols:
+                self.pos_map[s_] = sp.Symbol(s_.name, positive=True)
+        self.params = [a.xreplace(self.pos_map) for a in params]
+        self.discrete = kind in self.DISCRETE
+        if check:
+            self.check()
+
+    def check(self):
+        a, k = self.params, self.kind
+
+        def num(x):
+            return x.is_number and x.is_real
+
+        if any(x.has(sp.I, sp.zoo, sp.nan) for x in a):
+            raise ParseError("complex parameters")
+        ok = True
+        if k == "normal":
+            ok = not num(a[1]) or a[1] > 0
+        elif k == "binomial":
+            ok = (not num(a[0]) or (a[0].is_integer and a[0] >= 0)) and (not num(a[1]) or 0 <= a[1] <= 1)
+        elif k in ("poisson", "exponential", "t", "chi2"):
+            ok = not num(a[0]) or a[0] > 0
+        elif k == "uniform":
+            ok = not (num(a[0]) and num(a[1])) or a[0] < a[1]
+        elif k == "bernoulli":
+            ok = not num(a[0]) or 0 <= a[0] <= 1
+        elif k == "geometric":
+            ok = not num(a[0]) or 0 < a[0] <= 1
+        elif k in ("f", "beta"):
+            ok = all(not num(x) or x > 0 for x in a)
+        if not ok:
+            raise ParseError(f"invalid parameters for {k}")
+
+    def describe(self, name):
+        n = f"${to_latex(sp.Symbol(name))}$"
+        a = [_nice(x) for x in self.params]
+        k = self.kind
+
+        def eq(label, v):                        # "$p = 0.3$", or just "$p$" when p is symbolic
+            return f"${label}$" if v == label else f"${label} = {v}$"
+
+        if k == "normal":
+            return f"{n} normal, mean ${a[0]}$, sd ${_nice(sp.sqrt(self.params[1]))}$"
+        if k == "binomial":
+            return f"{n} binomial, {eq('n', a[0])}, {eq('p', a[1])}"
+        if k == "poisson":
+            return f"{n} Poisson, mean ${a[0]}$"
+        if k == "exponential":
+            return f"{n} exponential, rate ${a[0]}$ (mean ${_nice(1 / self.params[0])}$)"
+        if k == "uniform":
+            return f"{n} continuous uniform on $[{a[0]}, {a[1]}]$"
+        if k == "bernoulli":
+            return f"{n} Bernoulli, {eq('p', a[0])}"
+        if k == "geometric":
+            return f"{n} geometric, {eq('p', a[0])}, counting trials $1, 2, \\dots$"
+        if k == "t":
+            return f"{n} Student $t$, ${a[0]}$ df"
+        if k == "chi2":
+            return f"{n} chi-squared, ${a[0]}$ df"
+        if k == "f":
+            return f"{n} $F$, ${a[0]}$ and ${a[1]}$ df"
+        return f"{n} beta, {eq('a', a[0])}, {eq('b', a[1])}"
+
+    def need_numbers(self):
+        if not all(x.is_number for x in self.params):
+            raise Refuse("probabilities need numeric parameters")
+
+    # -- moments
+    def moment(self, k):
+        """E[X^k]."""
+        a, kind = self.params, self.kind
+        if k == 0:
+            return sp.Integer(1)
+        t = sp.Dummy("t")
+        if kind == "normal":
+            mgf = sp.exp(a[0] * t + a[1] * t ** 2 / 2)
+        elif kind == "binomial":
+            mgf = (1 - a[1] + a[1] * sp.exp(t)) ** a[0]
+        elif kind == "poisson":
+            mgf = sp.exp(a[0] * (sp.exp(t) - 1))
+        elif kind == "geometric":
+            mgf = a[0] * sp.exp(t) / (1 - (1 - a[0]) * sp.exp(t))
+        elif kind == "bernoulli":
+            return a[0]
+        elif kind == "exponential":
+            return sp.factorial(k) / a[0] ** k
+        elif kind == "uniform":
+            return (a[1] ** (k + 1) - a[0] ** (k + 1)) / ((k + 1) * (a[1] - a[0]))
+        elif kind == "beta":
+            return sp.Mul(*[(a[0] + r) / (a[0] + a[1] + r) for r in range(k)])
+        elif kind == "chi2":
+            return sp.Mul(*[a[0] + 2 * r for r in range(k)])
+        elif kind == "t":
+            nu = a[0]
+            if nu.is_number and k >= nu:
+                raise Refuse("that moment of the t distribution doesn't exist")
+            if k % 2:
+                return sp.Integer(0)
+            return nu ** (k // 2) * sp.Mul(*[sp.Integer(2 * j - 1) / (nu - 2 * j) for j in range(1, k // 2 + 1)])
+        else:                                     # f
+            d1, d2 = a
+            if d2.is_number and 2 * k >= d2:
+                raise Refuse("that moment of the F distribution doesn't exist")
+            return (d2 / d1) ** k * sp.rf(d1 / 2, k) / sp.Mul(*[d2 / 2 - j for j in range(1, k + 1)])
+        return sp.simplify(sp.diff(mgf, t, k).subs(t, 0))
+
+    # -- probabilities
+    def cdf(self, x):
+        """P(X <= x) for a number x or ±oo (an integer for discrete laws)."""
+        if x == sp.oo:
+            return sp.Integer(1)
+        if x == -sp.oo:
+            return sp.Integer(0)
+        a, k = self.params, self.kind
+        if k == "normal":
+            return (1 + sp.erf((x - a[0]) / sp.sqrt(2 * a[1]))) / 2
+        if k == "exponential":
+            return sp.Integer(0) if _truth(x <= 0) else 1 - sp.exp(-a[0] * x)
+        if k == "uniform":
+            if _truth(x <= a[0]):
+                return sp.Integer(0)
+            if _truth(x >= a[1]):
+                return sp.Integer(1)
+            return (x - a[0]) / (a[1] - a[0])
+        self.need_numbers()
+        if not x.is_number:
+            raise Refuse("a symbolic bound")
+        if k == "binomial":
+            n, p = int(a[0]), a[1]
+            if x < 0:
+                return sp.Integer(0)
+            if x >= n:
+                return sp.Integer(1)
+            x = int(x)
+            if n <= STAT_EXACT and _small(p, n):
+                return sp.Add(*[sp.binomial(n, j) * p ** j * (1 - p) ** (n - j) for j in range(x + 1)])
+            return _mp_float(lambda mp: _betainc(mp, mp.mpf(n - x), mp.mpf(x + 1), 1 - _mpf(p)))
+        if k == "poisson":
+            lam = a[0]
+            if x < 0:
+                return sp.Integer(0)
+            x = int(x)
+            if x <= 200 and _small(lam, x):
+                return sp.exp(-lam) * sp.Add(*[lam ** j / sp.factorial(j) for j in range(x + 1)])
+            return _mp_float(lambda mp: mp.gammainc(x + 1, _mpf(lam), mp.inf, regularized=True))
+        if k == "bernoulli":
+            return sp.Integer(0) if x < 0 else (1 - a[0] if x < 1 else sp.Integer(1))
+        if k == "geometric":
+            if x < 1:
+                return sp.Integer(0)
+            x = int(x)
+            if x <= STAT_EXACT and _small(a[0], x):
+                return 1 - (1 - a[0]) ** x
+            return _mp_float(lambda mp: 1 - (1 - _mpf(a[0])) ** x)
+        if k == "beta":
+            if x <= 0:
+                return sp.Integer(0)
+            if x >= 1:
+                return sp.Integer(1)
+            if a[0].is_Integer and a[1].is_Integer and a[0] + a[1] <= STAT_EXACT and _small(x, int(a[0] + a[1])):
+                m = int(a[0] + a[1] - 1)
+                return sp.Add(*[sp.binomial(m, j) * x ** j * (1 - x) ** (m - j) for j in range(int(a[0]), m + 1)])
+        if k in ("chi2", "f") and x <= 0:
+            return sp.Integer(0)
+        return _mp_float(lambda mp: self._cdf_mp(mp, _mpf(x)))
+
+    def _cdf_mp(self, mp, x):
+        a = [_mpf(p) for p in self.params]
+        if self.kind == "t":
+            return _t_cdf(mp, x, a[0])
+        if x <= 0:
+            return mp.mpf(0)
+        if self.kind == "chi2":
+            return mp.gammainc(a[0] / 2, 0, x / 2, regularized=True)
+        if self.kind == "f":
+            return _betainc(mp, a[0] / 2, a[1] / 2, a[0] * x / (a[0] * x + a[1]))
+        if self.kind == "beta":
+            return _betainc(mp, a[0], a[1], x)
+        raise Refuse("no numeric CDF")
+
+    def upper_quantile(self, alpha):
+        """x with P(X > x) = alpha (t, chi-squared and F critical values)."""
+        self.need_numbers()
+        mp = _mpmath()
+        with mp.workdps(40):
+            target = 1 - _mpf(alpha)
+            lo, hi = (mp.mpf(-1), mp.mpf(1)) if self.kind == "t" else (mp.mpf(0), mp.mpf(1))
+            for _ in range(200):
+                if self._cdf_mp(mp, hi) >= target:
+                    break
+                lo, hi = (lo, hi * 2) if self.kind != "t" else (lo, hi * 2)
+            for _ in range(200):
+                if self.kind != "t" or self._cdf_mp(mp, lo) <= target:
+                    break
+                lo *= 2
+            for _ in range(120):
+                mid = (lo + hi) / 2
+                if self._cdf_mp(mp, mid) < target:
+                    lo = mid
+                else:
+                    hi = mid
+            return sp.Float(mp.nstr((lo + hi) / 2, 30), 30)
+
+    def pmf(self, k):
+        a, kind = self.params, self.kind
+        k = int(k)
+        if kind == "binomial":
+            n, p = int(a[0]), a[1]
+            if not 0 <= k <= n:
+                return sp.Integer(0)
+            if n <= STAT_EXACT and _small(p, n):
+                return sp.binomial(n, k) * p ** k * (1 - p) ** (n - k)
+            return _mp_float(lambda mp: mp.binomial(n, k) * _mpf(p) ** k * (1 - _mpf(p)) ** (n - k))
+        if kind == "poisson":
+            if k < 0:
+                return sp.Integer(0)
+            if k <= STAT_EXACT and _small(a[0], k):
+                return sp.exp(-a[0]) * a[0] ** k / sp.factorial(k)
+            return _mp_float(lambda mp: mp.exp(-_mpf(a[0])) * _mpf(a[0]) ** k / mp.factorial(k))
+        if kind == "bernoulli":
+            return a[0] if k == 1 else (1 - a[0] if k == 0 else sp.Integer(0))
+        if k < 1:
+            return sp.Integer(0)
+        if k <= STAT_EXACT and _small(a[0], k):
+            return (1 - a[0]) ** (k - 1) * a[0]
+        return _mp_float(lambda mp: (1 - _mpf(a[0])) ** (k - 1) * _mpf(a[0]))
+
+    def interval(self, lo, hi, lopen, ropen):
+        if not self.discrete:
+            return self.cdf(hi) - self.cdf(lo)
+        self.need_numbers()
+        if not (lo.is_number or lo == -sp.oo) or not (hi.is_number or hi == sp.oo):
+            raise Refuse("a symbolic bound")
+        klo = -sp.oo if lo == -sp.oo else (sp.floor(lo) + 1 if lopen else sp.ceiling(lo))
+        khi = sp.oo if hi == sp.oo else (sp.ceiling(hi) - 1 if ropen else sp.floor(hi))
+        if klo != -sp.oo and khi != sp.oo and khi < klo:
+            return sp.Integer(0)
+        return self.cdf(khi) - self.cdf(klo - 1)
+
+    def measure(self, s_):
+        total = sp.Integer(0)
+        for piece in _pieces(s_):
+            if piece[0] == "pt":
+                if self.discrete:
+                    v = piece[1]
+                    self.need_numbers()
+                    if not v.is_number:
+                        raise Refuse("a symbolic point")
+                    if v.is_integer:
+                        total += self.pmf(v)
+            else:
+                total += self.interval(*piece[1:])
+        return total
+
+
+def _pieces(s_):
+    if s_ is sp.S.EmptySet:
+        return []
+    if s_ == sp.S.Reals:
+        return [("iv", -sp.oo, sp.oo, True, True)]
+    if isinstance(s_, sp.Union):
+        return [p for a in s_.args for p in _pieces(a)]
+    if isinstance(s_, sp.Interval):
+        return [("iv", s_.start, s_.end, s_.left_open, s_.right_open)]
+    if isinstance(s_, sp.FiniteSet):
+        return [("pt", v) for v in s_]
+    raise Refuse("an event that isn't a union of intervals")
+
+
+def event_set(cond, x):
+    """The values of the random variable x where cond holds."""
+    if cond in (sp.true, True):
+        return sp.S.Reals
+    if cond in (sp.false, False):
+        return sp.S.EmptySet
+    if isinstance(cond, sp.And):
+        return sp.Intersection(*[event_set(a, x) for a in cond.args])
+    if isinstance(cond, sp.Or):
+        return sp.Union(*[event_set(a, x) for a in cond.args])
+    if isinstance(cond, sp.Not):
+        return sp.Complement(sp.S.Reals, event_set(cond.args[0], x))
+    if isinstance(cond, sp.core.relational.Relational):
+        if x not in cond.free_symbols:
+            raise Refuse("a condition without the random variable")
+        s_ = step(lambda: sp.solveset(cond, x, sp.S.Reals))
+        if s_ is None or s_.has(sp.ConditionSet) or isinstance(s_, sp.ConditionSet) or s_.has(sp.ImageSet):
+            raise Refuse("can't solve the event")
+        return s_
+    raise Refuse("unsupported event")
+
+
+def reduce_normals(ev, given, pairs):
+    """Events about a linear combination of independent normals (X - Y > 0) are about one normal."""
+    if any(d.kind != "normal" for _, d in pairs):
+        raise Refuse("events of several variables are only computed for normal ones")
+    syms = [s_ for s_, _ in pairs]
+    rels = set()
+    for c in (ev, given):
+        if c is not None:
+            rels |= c.atoms(sp.core.relational.Relational)
+    w = sp.Dummy("W")
+    base, mapping = None, {}
+    for r in rels:
+        d = sp.expand(r.lhs - r.rhs)
+        coeffs = [d.coeff(s_) for s_ in syms]
+        rest = sp.expand(d - sum(c * s_ for c, s_ in zip(coeffs, syms)))
+        if rest.free_symbols & set(syms) or any(not c.is_number for c in coeffs):
+            raise Refuse("not a linear combination")
+        if all(c == 0 for c in coeffs):
+            raise Refuse("a condition without the random variables")
+        if base is None:
+            base, k = coeffs, sp.Integer(1)
+        else:
+            j = next(i for i, c in enumerate(base) if c != 0)
+            k = coeffs[j] / base[j]
+            if any(sp.simplify(c - k * b) != 0 for c, b in zip(coeffs, base)):
+                raise Refuse("different combinations of the variables")
+        mapping[r] = r.func(k * w + rest, 0)
+    if base is None:
+        raise Refuse("no relation")
+    mean = sp.Add(*[c * d.params[0] for c, (_, d) in zip(base, pairs)])
+    var = sp.Add(*[c ** 2 * d.params[1] for c, (_, d) in zip(base, pairs)])
+    dist = Dist("normal", [mean, var], check=False)
+    return dist, w, ev.xreplace(mapping), (given.xreplace(mapping) if given is not None else None)
+
+
+def prob_value(ev, given, parser):
+    conds = [c for c in (ev, given) if c is not None]
+    names = [n for n in parser.used if any(sp.Symbol(n) in getattr(c, "free_symbols", ()) for c in conds)]
+    if not names:
+        raise Refuse("no declared random variable in the event")
+    pmap = {}
+    for n in names:
+        pmap.update(parser.used[n].pos_map)
+    conds = [c.xreplace(pmap) for c in conds]
+    # Other names (mu in N(mu, sigma^2)) are real numbers: X > mu is then an interval.
+    free = set().union(*[c.free_symbols for c in conds], *[p.free_symbols for n in names for p in parser.used[n].params])
+    rmap = {s_: sp.Symbol(s_.name, real=True) for s_ in free if s_.name not in names and not s_.is_real}
+    conds = [c.xreplace(rmap) for c in conds]
+    ev, given = conds[0], (conds[1] if given is not None else None)
+    dists = {n: Dist(parser.used[n].kind, [p.xreplace(rmap) for p in parser.used[n].params], check=False) for n in names}
+    if len(names) == 1:
+        dist, x = dists[names[0]], sp.Symbol(names[0])
+    else:
+        dist, x, ev, given = reduce_normals(ev, given, [(sp.Symbol(n), dists[n]) for n in names])
+        parser.note(", ".join(f"${to_latex(sp.Symbol(n))}$" for n in names) + " independent")
+    a = event_set(ev, x)
+    if given is None:
+        return dist.measure(a)
+    b = event_set(given, x)
+    pb = dist.measure(b)
+    if pb == 0:
+        raise Refuse("conditioning on an event of probability 0")
+    return dist.measure(sp.Intersection(a, b)) / pb
+
+
+def expect_value(g, parser):
+    """E[g] for a polynomial g of declared random variables (independent ones, if several)."""
+    if isinstance(g, sp.MatrixBase):
+        raise ParseError("the expectation of a matrix")
+    g = sp.sympify(g)
+    names = parser.rv_names(g)
+    if not names:
+        raise Refuse("no declared random variable")
+    if len(names) > 1:
+        parser.note(", ".join(f"${to_latex(sp.Symbol(n))}$" for n in names) + " independent")
+    pmap = {}
+    for n in names:
+        pmap.update(parser.used[n].pos_map)
+    g = g.xreplace(pmap)
+    syms = [sp.Symbol(n) for n in names]
+    try:
+        poly = sp.Poly(sp.expand(g), *syms)
+    except sp.PolynomialError:
+        raise Refuse("only polynomials of random variables") from None
+    if poly.total_degree() > 12:
+        raise Refuse("too high a moment")
+    total = sp.Integer(0)
+    for monom, coeff in poly.terms():
+        term = coeff
+        for s_, k in zip(syms, monom):
+            if k:
+                term *= parser.used[s_.name].moment(k)
+        total += term
+    return total
+
+
+def variance_value(g, parser):
+    return expect_value(sp.expand(g ** 2), parser) - expect_value(g, parser) ** 2
+
+
+def _one_name(toks):
+    try:
+        e = Parser(list(toks)).parse()
+    except Exception:  # noqa: BLE001 - not a name
+        return None
+    return e.name if isinstance(e, sp.Symbol) else None
+
+
+def _decl_names(text):
+    """The names just before \\sim: "Let X" -> [X], "X, Y" -> [X, Y], "X_1, \\dots, X_n" -> [X_n]."""
+    toks = tokenize(text)
+    names, end = [], len(toks)
+    while end > 0 and len(names) < 8:
+        found = None
+        for n in range(min(8, end), 0, -1):
+            nm = _one_name(toks[end - n:end])
+            if nm:
+                found = (nm, n)
+                break
+        if not found:
+            break
+        names.insert(0, found[0])
+        end -= found[1]
+        if end > 0 and toks[end - 1].is_("sym", ","):
+            end -= 1
+            continue
+        break
+    return names
+
+
+def parse_decls(items):
+    """{"name": "Let X", "dist": "N(100, 15^2), …"} pairs (the text either side of \\sim) -> {name: Dist}.
+    Later declarations win. A name declared with something texc can't read maps to None, which blocks
+    it (and the Z default): its older declaration no longer applies."""
+    out = {}
+    if not isinstance(items, list):
+        return out
+    for it in items[-MAX_DECLS:]:
+        if not isinstance(it, dict) or not isinstance(it.get("name"), str) or not isinstance(it.get("dist"), str):
+            continue
+        try:
+            names = _decl_names(it["name"][-120:])
+        except Exception:  # noqa: BLE001 - not a name
+            continue
+        if not names:
+            continue
+        try:
+            dist = Parser(tokenize(it["dist"][:300])).dist_spec()
+        except Timeout:
+            raise
+        except Exception:  # noqa: BLE001 - X \\sim something texc can't read: X has no known law now
+            dist = None
+        for name in names:
+            out[name] = dist
+    return out
+
+
+# ---------------------------------------------------------------------------------------------
 # Evaluation and output
 # ---------------------------------------------------------------------------------------------
 
@@ -1214,19 +2325,19 @@ def evaluate(expr):
     return r, note
 
 
-def compute(latex: str, budget: float = TOTAL_SECONDS):
-    """The result for the left-hand side `latex`, or None.
+def compute(latex: str, budget: float = TOTAL_SECONDS, decls=None):
+    """The result for the left-hand side `latex`, or None. `decls`: see parse_decls.
 
     {"latex": shown/inserted LaTeX, "approx": True when it is a rounded decimal (the "=" then
      becomes \\approx), "alt": {"latex", "approx"} or None (the decimal of an exact number),
-     "note": e.g. "assuming a > 0" or None}"""
+     "note": e.g. "assuming a > 0", or what a statistics result assumes, with math in $…$; or None}"""
     load()
     src = (latex or "").strip()
     if not src or len(src) > MAX_INPUT:
         return None
     try:
         with deadline(budget):
-            return _compute(src)
+            return _compute(src, parse_decls(decls) if decls else {})
     except Timeout:
         raise
     except (ParseError, RecursionError):
@@ -1235,21 +2346,31 @@ def compute(latex: str, budget: float = TOTAL_SECONDS):
         return None
 
 
-def _compute(src):
+def _compute(src, decls=None):
     toks = tokenize(src)
     if not toks:
         return None
-    parser = Parser(list(toks))
+    parser = Parser(list(toks), decls)
     p = parser.parse()
     flags, env = parser.flags, parser.env
+    snote = "; ".join(parser.notes) or None
+    if parser.pm is not None:
+        return _pm_result(parser)
     if isinstance(p, sp.MatrixBase):
         if "matrix-op" not in flags:
             return None
-        r = p.applyfunc(lambda x: step(sp.simplify, x, fallback=x))
-        out = to_latex(r, env)
-        if norm(out) == norm(src) or len(out) > MAX_LATEX_OUT * 2:
-            return None
-        return {"latex": out, "approx": False, "alt": None, "note": None}
+        return _matrix_result(p, env, flags, snote, src)
+    if flags & {"stats", "numeric"}:
+        q = sp.sympify(p)
+        if "calculus" in flags:                       # \\int_0^1 \\operatorname{sigmoid}(x)\\,dx
+            q, cnote = evaluate(q)
+            if q is None or (q.has(sp.Integral, sp.Sum, sp.Product, sp.Limit, sp.Derivative) and q.free_symbols):
+                return None
+            snote = "; ".join(x for x in (snote, cnote) if x) or None
+        res = _stats_result(q, snote, src)
+        if res and "indefinite" in flags:
+            res = dict(res, latex=res["latex"] + " + C", alt=None)
+        return res
     p = sp.sympify(p)
     if len(toks) == 1:
         return None
@@ -1334,6 +2455,106 @@ def _compute(src):
     return {"latex": out, "approx": False, "alt": alt, "note": note}
 
 
+def _short(v):
+    """The rounded value people write in statistics: 0.9750, 1.960, 2.277 × 10^{-7}."""
+    v = sp.N(v, 20)
+    if v == 0 or not v.is_real:
+        return None
+    av = abs(float(v))
+    if 1e-4 <= av < 1:
+        return f"{float(v):.4f}"
+    if 1 <= av < 1000:
+        import math
+        return f"{float(v):.{3 - int(math.floor(math.log10(av)))}f}"
+    if av < 1e-4:
+        return _fmt(v, 4)
+    return None
+
+
+def _mat_tex(shape, cells, env):
+    r, c = shape
+    if env == "tuple" and 1 in (r, c):
+        return "(" + ", ".join(cells) + ")"
+    env = env if env in ("pmatrix", "bmatrix", "Bmatrix", "matrix") else "pmatrix"
+    rows = [" & ".join(cells[i * c:(i + 1) * c]) for i in range(r)]
+    return f"\\begin{{{env}}}" + "\\\\".join(rows) + f"\\end{{{env}}}"
+
+
+def _matrix_result(p, env, flags, note, src):
+    r = p.applyfunc(lambda x: step(sp.simplify, x, fallback=x))
+    if "numeric" in flags or "stats" in flags or any(sp.sympify(x).has(sp.Float) for x in r):
+        cells, approx = [], False
+        for x in r:
+            d, exact = decimal(sp.sympify(x)) if sp.sympify(x).is_number else (None, False)
+            if d is None:
+                return None
+            cells.append(d)
+            approx = approx or not exact
+        return {"latex": _mat_tex(r.shape, cells, env), "approx": approx, "alt": None, "note": note}
+    out = _mat_tex(r.shape, [to_latex(x) for x in r], env) if env == "tuple" else to_latex(r, env)
+    if norm(out) == norm(src) or len(out) > MAX_LATEX_OUT * 2:
+        return None
+    return {"latex": out, "approx": False, "alt": None, "note": note}
+
+
+def _pm_result(parser):
+    """52 \\pm 1.96 -> the interval (50.04, 53.96)."""
+    a, b = parser.pm
+    if isinstance(a, sp.MatrixBase) or isinstance(b, sp.MatrixBase):
+        return None
+    vals = []
+    for v in (sp.sympify(a) - sp.sympify(b), sp.sympify(a) + sp.sympify(b)):
+        if "calculus" in parser.flags:
+            v, _ = evaluate(v)
+            if v is None:
+                return None
+        v = step(sp.simplify, v, fallback=v)
+        if not is_plain_number(v) or v.is_real is False or step(lambda: sp.im(sp.N(v, 20)) != 0, fallback=True):
+            return None
+        vals.append(v)
+    vals.sort(key=lambda v: sp.N(v, 30))
+    cells, approx = [], False
+    for v in vals:
+        d, exact = decimal(v)
+        if v.is_Rational and not exact:
+            d, exact = to_latex(v), True                # 1/3 stays a fraction
+        if d is None:
+            return None
+        cells.append(d)
+        approx = approx or not exact
+    return {"latex": f"({cells[0]}, {cells[1]})", "approx": approx, "alt": None,
+            "note": "; ".join(parser.notes) or None}
+
+
+def _stats_result(p, note, src):
+    """Probabilities, moments, critical values, data summaries, ML functions: decimal first."""
+    r = sp.sympify(p)
+    if r.free_symbols:                                    # Var(2X + 3) = 4 \\sigma^2, n p (1 - p)
+        s_ = step(sp.simplify, r, fallback=r)
+        forms = [s_] + [f for f in (step(sp.factor, s_), step(sp.expand, s_)) if f is not None]
+        s_ = min(forms, key=lambda f: len(to_latex(f)))
+        out = to_latex(s_)
+        if norm(out) == norm(src) or len(out) > MAX_LATEX_OUT or s_.has(sp.Integral, sp.Sum):
+            return None
+        return {"latex": out, "approx": False, "alt": None, "note": note}
+    if not is_plain_number(r) or not (r.is_real or r.is_real is None):
+        return None
+    if r.is_Rational and len(to_latex(r)) <= 40:
+        d = _rational_decimal(r)
+        if d is not None and len(d.replace("-", "").replace(".", "")) <= 12:
+            short = _short(r)
+            alt = {"latex": short, "approx": True} if short and _value(short) != r else None
+            return {"latex": d, "approx": False, "alt": alt, "note": note}
+        dec, exact = decimal(r)
+        return {"latex": to_latex(r), "approx": False, "alt": dec and {"latex": dec, "approx": not exact}, "note": note}
+    dec, exact = decimal(r)
+    if dec is None:
+        return None
+    short = _short(r)
+    alt = {"latex": short, "approx": True} if short and short != dec else None
+    return {"latex": dec, "approx": not exact, "alt": alt, "note": note}
+
+
 def _really_factored(c):
     """A factorisation worth showing: at least two non-constant factors, or a power of a sum."""
     if isinstance(c, sp.Pow):
@@ -1366,7 +2587,7 @@ def worker() -> int:
         except ValueError:
             continue
         try:
-            res = compute(str(req.get("latex") or ""), float(req.get("budget") or TOTAL_SECONDS))
+            res = compute(str(req.get("latex") or ""), float(req.get("budget") or TOTAL_SECONDS), req.get("decls"))
             out = {"id": rid, "ok": True, "result": res}
         except Timeout:
             out = {"id": rid, "ok": False, "error": "timeout"}
@@ -1384,9 +2605,15 @@ def main(argv=None) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__.strip())
         return 0
-    for a in argv:
+    decls = []                                   # --decl 'X \\sim N(100, 15^2)' before the formulas
+    it = iter(argv)
+    for a in it:
+        if a == "--decl":
+            name, _, dist = next(it, "").partition("\\sim")
+            decls.append({"name": name, "dist": dist})
+            continue
         try:
-            print(f"{a}  =>  {json.dumps(compute(a), ensure_ascii=False)}")
+            print(f"{a}  =>  {json.dumps(compute(a, decls=decls), ensure_ascii=False)}")
         except Timeout:
             print(f"{a}  =>  timeout")
     return 0
