@@ -27,6 +27,16 @@ optional AI assistant talks to the internet.
   arithmetic, fractions, roots, trig and logs, integrals, derivatives, limits, sums and products, and matrices
   (inverse, transpose, determinant). For example, `\int_0^1 x^2\,dx =` offers `\frac{1}{3}` and `\sqrt{2} =` offers
   `\approx 1.414213562`. It runs locally with [SymPy](https://www.sympy.org).
+- **Statistics and ML after `=`.** Declare a variable once, `X \sim N(100, 15^2)`, and `P(X > 130) =` offers
+  `\approx 0.02275013195`. **⌥Tab** inserts the table-style value, 0.0228. Also covered:
+  - `P(…)` with `<`, `\le`, `|X|`, ranges and `\mid`, plus `E[…]`, `\operatorname{Var}`, `SD`, `Cov` and `Corr`;
+  - normal, binomial, Poisson, exponential, uniform, Bernoulli, geometric, $t$, $\chi^2$, $F$ and beta variables;
+  - critical values `z_{0.025}`, `t_{0.025,10}`, `\chi^2_{0.05,3}` and `F_{0.05,2,10}`, and `\Phi(1.96)` and
+    `\Phi^{-1}(0.975)`;
+  - data summaries, `\operatorname{mean}(…)`, `median`, `mode`, `Var` and `sd`;
+  - ML helpers: `sigmoid`, `ReLU`, `softmax`, `softplus`, vector norms `\|v\|`, dot `\cdot` and cross `\times`
+    products;
+  - confidence intervals, where `52 \pm 1.96 \cdot 1 =` offers `(50.04, 53.96)`.
 - **Writing tools.** Literature search on arXiv with one-click BibTeX, word count, "fix errors with AI", a
   proofreading pass, and math preview in the chat.
 - **Offline-friendly.** Editing, compiling and previewing never need the internet.
@@ -75,7 +85,20 @@ How `=` results read your math:
 - `\log` is the natural log (use `\log_{10}` for base 10).
 - `i` and `e` are the imaginary unit and Euler's number, except as a sum index.
 - `x^23` is read the way TeX typesets it (x² times 3), so write `x^{23}`.
-- Names before brackets, like `f(x)`, `P(A)`, `\sigma(z)` or `\mathbb{E}[X]`, are functions whose values texc doesn't know, so they get no result. So does `x_i` inside `\sum_i`.
+- Names before brackets, like `f(x)`, `P(A)` or `\sigma(z)`, are functions whose values texc doesn't know, so they get no result. So does `x_i` inside `\sum_i`.
+- `P(…)`, `E[…]` and `\operatorname{Var}(…)` need the variable's distribution, written as `X \sim …` before the `=`
+  (the nearest one wins; commented-out lines don't count; `X, Y \sim …` declares both). Without one, they get no
+  result, and so does a variable last declared with something texc can't read, like `\text{Gamma}(2, 3)` or
+  `N(0, I)`. The only built-in is `Z`, the standard normal.
+- What a result assumes is shown under it:
+  - `N(\mu, \sigma^2)` takes the variance, so `N(100, 15)` has sd √15; write `N(100, 15^2)` for sd 15.
+  - `\text{Exp}(\lambda)` takes the rate.
+  - `\text{Geom}(p)` counts trials 1, 2, ….
+  - `z_{\alpha}`, `t_{\alpha,\nu}` and `\chi^2_{\alpha,\nu}` have upper-tail area α.
+  - Data `Var`/`sd` divide by n − 1.
+  - Several variables are independent. Events about more than one variable are computed only when the variables are
+    normal and the event is about a linear combination of them, such as `P(X - Y > 0)`.
+- Sigmoid is `\operatorname{sigmoid}`. `\sigma(z)` stays a function name, since σ is also the standard deviation.
 - A rounded decimal turns the `=` into `\approx` when you insert it.
 
 ## Privacy
@@ -96,7 +119,7 @@ processes, HTTP API, bridge and test tools.
 - No build step for the front end: edit `gui/` and reload the window (View → Reload Page, ⇧⌘R).
 - Rebuild the app after changing `app/texc.swift`: `bash app/build.sh`.
 - End-to-end check, which runs the app invisibly in automation mode: `python3 app/test/final_check.py`.
-- Checks for the `=` results (math table, server, typing in headless Chrome): `python3 app/test/calc_check.py`.
+- Checks for the `=` results (math and statistics tables, server, typing in headless Chrome): `python3 app/test/calc_check.py`.
 
 ## License
 
