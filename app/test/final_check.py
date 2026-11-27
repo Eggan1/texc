@@ -32,7 +32,8 @@ subprocess.run(["rsync", "-a", "--exclude", ".texc", "--exclude", "*.pdf", "--ex
 os.makedirs(os.path.join(F, "empty"))
 
 # 1. Python 3.9 still imports both modules
-r = subprocess.run(["/usr/bin/python3", "-m", "py_compile", os.path.join(TEXC, "server.py"), os.path.join(TEXC, "texc.py")],
+r = subprocess.run(["/usr/bin/python3", "-m", "py_compile", os.path.join(TEXC, "server.py"), os.path.join(TEXC, "texc.py"),
+                    os.path.join(TEXC, "mathcalc.py")],
                    capture_output=True, text=True)
 check("py_compile under /usr/bin/python3 (3.9)", r.returncode == 0, r.stderr.strip()[:200])
 
@@ -54,6 +55,13 @@ return {canvases: document.querySelectorAll('#pdf-pages canvas').length, errors:
 check("project boots and the PDF renders", isinstance(res, dict) and res.get("canvases", 0) > 0 and not res.get("errors"), json.dumps(res)[:300])
 res = ev(win, """const p = await T.api.get('/api/project'); return {main: p.main, main_exists: p.main_exists, app: p.app, has_ui_state: typeof p.ui_state === 'object'};""")
 check("/api/project has the new fields", isinstance(res, dict) and res.get("main_exists") is True and res.get("app") is True and res.get("has_ui_state"), json.dumps(res))
+# "=" results: the app's own server (launched like Finder does) finds SymPy and computes. Typing
+# itself is checked with real key events in headless Chrome (calc_check.py).
+res = ev(win, r"""const st = await T.api.get('/api/calc');
+const r = await T.api.post('/api/calc', {latex: '\\sum_{k=1}^{10} k^2'});
+return {available: st.available, sympy: st.sympy, latex: r && r.result && r.result.latex};""", 40)
+check("app: the server finds SymPy and computes = results", isinstance(res, dict) and res.get("available") is True
+      and res.get("latex") == "385", json.dumps(res))
 r = auto.cmd(AUTO, {"cmd": "open", "path": os.path.join(F, "empty"), "newWindow": True}, 60)
 w2 = r.get("window")
 res = ev(w2, """await T.app.ready; await new Promise(r => setTimeout(r, 1500));
@@ -91,6 +99,9 @@ auto.quit_app(AUTO)
 time.sleep(1.5)
 left = subprocess.run(["pgrep", "-fl", "texc.py gui|MacOS/texc"], capture_output=True, text=True).stdout.strip()
 left = "\n".join(l for l in left.splitlines() if BASE in l or "MacOS/texc --automation " + AUTO in l)
+# a math worker is ours if its server was ours (now gone, so it would be orphaned: parent 1)
+ps = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True).stdout.splitlines()
+left = "\n".join([left] + [l for l in ps if "mathcalc.py --worker" in l and l.split()[1] == "1"]).strip()
 check("quit leaves no app or servers", not left, left[:200])
 
 # 3. Browser mode in headless Chrome

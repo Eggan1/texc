@@ -20,6 +20,7 @@ any browser (`texc gui FOLDER`).
 | Path | What it is |
 |---|---|
 | `texc.py` | The CLI (`texc file.tex`, `-w`, `--clean`, `gui`, `new`, `app`, `install-app`) and the build library the server imports |
+| `mathcalc.py` | The "=" results: a LaTeX-math parser that builds SymPy objects (never `eval`/`sympify` of text), run as a worker process |
 | `server.py` | The HTTP server: files, compiles, PDF, SyncTeX, AI bridge, Welcome screen, settings and state |
 | `gui/index.html`, `gui/js/*.js`, `gui/css/*.css` | The workspace: editor (CodeMirror 5), PDF preview (PDF.js), AI chat, file drawer |
 | `gui/welcome.html`, `gui/js/welcome.js`, `gui/css/welcome.css` | The Welcome screen: Recent folders, Open Folder, New Project, background image |
@@ -28,7 +29,7 @@ any browser (`texc gui FOLDER`).
 | `gui/vendor/` | Bundled third-party libraries (see THIRD_PARTY_NOTICES.md) |
 | `templates/` | New Project templates (`blank`, `article`) with `{{title}}` / `{{author}}` placeholders |
 | `app/texc.swift`, `app/build.sh` | The macOS app shell and its build/install script |
-| `app/test/` | Silent test tools: `auto.py`, `winprobe.swift`, `cdp.mjs`, `final_check.py` |
+| `app/test/` | Silent test tools: `auto.py`, `winprobe.swift`, `cdp.mjs`, `final_check.py`, `calc_check.py` |
 | `examples/demo/` | A small paper used for trying things out and for tests |
 
 ## 2. Processes
@@ -64,11 +65,12 @@ Every `/api` route needs the session token, sent as the `X-Texc-Token` header or
 | `GET /api/pdf`, `/api/log` | project | Latest PDF and log |
 | `GET /api/synctex/edit`, `/view` | project | PDF ↔ source jumps |
 | `GET /api/events` | both | Server-sent events: `hello`, `files`, `file`, `compile-start`, `compile` |
-| `GET/PUT /api/settings` | both | Global settings (provider, model, font size, autosave) |
+| `GET/PUT /api/settings` | both | Global settings (provider, model, font size, autosave, `mathResults`) |
 | `GET /api/chats`, `/api/chats/<id>` | project | Saved chats in `.texc/chats/` |
 | `POST /api/ai`, `/api/ai/cancel` | project | AI request streamed as SSE: `status`, `delta`, `notice`, `done`, `error` |
 | `GET /api/arxiv`, `POST /api/cite` | project | Literature search and BibTeX entries |
 | `POST /api/wordcount`, `/api/open-pdf`, `/api/clean` | project | Tools |
+| `GET /api/calc`, `POST /api/calc` | project | "=" results: status (starts the SymPy worker), or `{latex}` → `{ok, result: {latex, approx, alt, note} \| null}` |
 | `GET /api/lobby`, `POST /api/lobby/new` | lobby | Welcome data (recent, templates, defaults, tools, background); create a project |
 | `GET/POST /api/lobby/background` | lobby | Welcome background image: `{data: base64}`, `{opacity}`, `{clear: true}` |
 | `GET /api/recent`, `POST /api/recent/forget` | both | Recent folders |
@@ -85,6 +87,26 @@ Every `/api` route needs the session token, sent as the `X-Texc-Token` header or
 - **Codex (optional):** `codex exec --json --ephemeral -s read-only`.
 - **Edits:** the model answers with SEARCH/REPLACE blocks. The editor applies them as inline red/green hunks with **Keep ⌥Y / Undo ⌥N**.
 - **Offline:** network failures turn into a friendly "Can't reach Claude" message. Editing and compiling don't need the internet.
+
+## 4.1 Results after "="
+
+- **Trigger (`editor.js`).** Typing `=` inside math (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`, or an equation/align-like
+  environment) sends the left-hand side to `POST /api/calc`. That is the text after the last top-level relation, `&`,
+  `\\`, comma or `\text{}`. It fires only when the rest of the line is the end of the formula.
+- **Display.** The answer is a bookmark widget (ghost text) plus a KaTeX preview card. Nothing enters the document
+  until **Tab** (exact) or **⌥Tab** (decimal) inserts it as one undo step. A rounded decimal replaces the `=` with
+  `\approx`. Any edit, cursor move, blur or **Esc** dismisses it.
+- **Worker (`server.py` `MathEngine`).** `mathcalc.py --worker` is started on first use with the first of
+  `$TEXC_MATH_PYTHON`, the server's Python and `/usr/bin/python3` that has SymPy.
+  - It speaks JSON lines: `{"id","latex"}` in, `{"id","ok","result"}` out.
+  - One request at a time. The worker stops itself after about 4 s, and the server kills and restarts it after 6 s.
+  - It stops after 20 minutes idle, and exits when its stdin closes.
+- **Without SymPy** the feature is off. Settings shows the install command.
+- **Parsing (`mathcalc.py`).** A recursive-descent parser over TeX tokens builds SymPy objects directly.
+  - It reads arithmetic, `\frac`, `\sqrt`, functions, `|x|`, `\binom`, `!`, `\%` and `^\circ`.
+  - Calculus: `\int` (the differential `dx` ends the integrand), `\frac{d}{dx}`, `\partial`, `\lim`, `\sum` and `\prod`.
+  - Matrices: the matrix environments, with `^{-1}`, `^T` and `\det`.
+  - Anything it can't read, or an expression already in simplest form, gets no suggestion.
 
 ## 5. Front end
 
@@ -135,3 +157,5 @@ Run it through the tools in `app/test/`:
 - `winprobe PID` checks that no window is visible. Build it with `swiftc -O app/test/winprobe.swift -o app/test/winprobe`.
 - `node cdp.mjs URL --eval '…' --shot out.png` drives headless Chrome for browser-mode checks.
 - `python3 app/test/final_check.py` is the end-to-end acceptance check.
+- `python3 app/test/calc_check.py` checks the "=" results: a table of formulas with textbook answers, the worker,
+  the API, typing in headless Chrome, and the no-SymPy case.

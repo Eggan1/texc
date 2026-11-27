@@ -745,7 +745,7 @@ class Settings:
         return {"provider": provider,
                 "model": {"claude": "default", "codex": prov["codex"]["default_model"]},
                 "effort": "medium", "compileOnSave": True, "autosaveMs": 800, "fontSize": 13,
-                "compileTimeout": 120}
+                "compileTimeout": 120, "mathResults": True}
 
     def _load(self) -> None:  # caller holds self.lock
         try:
@@ -846,11 +846,11 @@ class Settings:
                     out[k] = v
                 else:
                     bad("effort must be low, medium or high.")
-            elif k == "compileOnSave":
+            elif k in ("compileOnSave", "mathResults"):
                 if isinstance(v, bool):
                     out[k] = v
                 else:
-                    bad("compileOnSave must be true or false.")
+                    bad(f"{k} must be true or false.")
             elif k in self.RANGES:
                 if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
                     bad(f"{k} must be a number.")
@@ -2311,6 +2311,194 @@ class Arxiv:
 # Application state
 # ---------------------------------------------------------------------------------------------
 
+class MathEngine:
+    """The editor's "=" results: mathcalc.py --worker, a SymPy process started on first use.
+
+    One request at a time. A request that overruns is answered "timeout" and the worker is
+    killed (SymPy can't be interrupted from a thread) and restarted on the next request. An idle
+    worker stops after IDLE seconds. SymPy is optional: without it the feature is just off.
+    The worker runs the first of TEXC_MATH_PYTHON, this Python and /usr/bin/python3 that has
+    SymPy, so `texc gui` under a Python without SymPy still finds the system one."""
+
+    TIMEOUT = 6.0            # per request; the worker gives up by itself after ~4 s
+    START_TIMEOUT = 20.0
+    IDLE = 20 * 60
+    RECHECK = 30.0           # how long "no SymPy" is believed before looking again
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.proc = None
+        self.lines = None
+        self.info: dict = {}
+        self.missing: dict | None = None
+        self.missing_at = 0.0
+        self.last_used = 0.0
+        self.seq = 0
+        self.closed = False
+        self._reaper = None
+
+    @staticmethod
+    def candidates() -> list[str]:
+        out, seen = [], set()
+        for p in (os.environ.get("TEXC_MATH_PYTHON"), sys.executable, "/usr/bin/python3"):
+            if not p or not os.path.isfile(p) or not os.access(p, os.X_OK):
+                continue
+            key = os.path.realpath(p)
+            if p in seen or key in seen:
+                continue
+            seen.update((p, key))
+            out.append(p)
+        return out
+
+    def _alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def _kill(self) -> None:  # caller holds self.lock
+        proc, self.proc, self.lines = self.proc, None, None
+        if proc is None:
+            return
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    def _start(self) -> bool:  # caller holds self.lock
+        if self._alive():
+            return True
+        self._kill()
+        if self.missing is not None and time.monotonic() - self.missing_at < self.RECHECK:
+            return False
+        errors = []
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONDONTWRITEBYTECODE="1")
+        for py in self.candidates():
+            try:
+                proc = subprocess.Popen([py, str(HERE / "mathcalc.py"), "--worker"], cwd=str(HERE), env=env,
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                        text=True, encoding="utf-8", bufsize=1)
+            except OSError as e:
+                errors.append(f"{py}: {e}")
+                continue
+            lines: queue.Queue = queue.Queue()
+
+            def pump(f=proc.stdout, q=lines):
+                try:
+                    for line in f:
+                        q.put(line)
+                except (OSError, ValueError):
+                    pass
+                q.put(None)
+
+            threading.Thread(target=pump, name="texc-math-out", daemon=True).start()
+            try:
+                hello = lines.get(timeout=self.START_TIMEOUT)
+                info = json.loads(hello) if hello else {}
+            except (queue.Empty, ValueError):
+                info = {}
+            if info.get("ready"):
+                self.proc, self.lines = proc, lines
+                self.info = {"python": py, "sympy": info.get("sympy"), "python_version": info.get("python")}
+                self.missing = None
+                self.last_used = time.monotonic()
+                if self._reaper is None:
+                    self._reaper = threading.Thread(target=self._reap, name="texc-math-idle", daemon=True)
+                    self._reaper.start()
+                log(f"math: SymPy {info.get('sympy')} via {py}")
+                return True
+            errors.append(info.get("error") or f"{py}: no answer")
+            try:
+                proc.kill()
+                proc.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        self.missing = {"error": "; ".join(errors) or "no Python found"}
+        self.missing_at = time.monotonic()
+        return False
+
+    def _reap(self) -> None:
+        while not self.closed:
+            time.sleep(30)
+            if self.closed:
+                return
+            if self.lock.acquire(blocking=False):
+                try:
+                    if self.proc is not None and time.monotonic() - self.last_used > self.IDLE:
+                        self._kill()
+                finally:
+                    self.lock.release()
+
+    def status(self) -> dict:
+        """Starts the worker (a warm-up) and says whether results are available."""
+        if self.closed:
+            return {"available": False, "error": "stopping"}
+        with self.lock:
+            ok = self._start()
+            if ok:
+                self.last_used = time.monotonic()
+                return {"available": True, **self.info}
+            return {"available": False, "error": (self.missing or {}).get("error"),
+                    "install": "python3 -m pip install --user sympy"}
+
+    def compute(self, latex: str) -> dict:
+        if self.closed:
+            return {"ok": False, "error": "stopping"}
+        if not self.lock.acquire(timeout=self.TIMEOUT):
+            return {"ok": False, "error": "busy"}
+        try:
+            if not self._start():
+                return {"ok": False, "available": False, "error": (self.missing or {}).get("error")}
+            self.seq += 1
+            rid = self.seq
+            try:
+                self.proc.stdin.write(json.dumps({"id": rid, "latex": latex}) + "\n")
+                self.proc.stdin.flush()
+            except (OSError, ValueError):
+                self._kill()
+                return {"ok": False, "error": "the math worker stopped"}
+            end = time.monotonic() + self.TIMEOUT
+            while True:
+                left = end - time.monotonic()
+                if left <= 0:
+                    log("math: a computation overran; restarting the worker")
+                    self._kill()
+                    return {"ok": False, "error": "timeout"}
+                try:
+                    line = self.lines.get(timeout=left)
+                except queue.Empty:
+                    continue
+                if line is None:
+                    self._kill()
+                    return {"ok": False, "error": "the math worker stopped"}
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if msg.get("id") == rid:
+                    break
+            self.last_used = time.monotonic()
+            out = {"ok": bool(msg.get("ok")), "result": msg.get("result") if msg.get("ok") else None}
+            if msg.get("error"):
+                out["error"] = msg["error"]
+            return out
+        finally:
+            self.lock.release()
+
+    def stop(self) -> None:
+        """Kill the worker now, even mid-request (that request then answers "stopped")."""
+        self.closed = True
+        proc = self.proc
+        if proc is not None:
+            try:
+                proc.kill()
+                proc.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+
 class FolderChild:
     """A `texc.py gui PATH --app` server started by /api/open-folder (browser mode). We keep its
     stdin pipe open and never write to it: when this server stops (or dies), the pipe closes
@@ -2455,6 +2643,7 @@ class App:
         self.compiler = Compiler(self) if project is not None else None
         self.watcher = Watcher(self) if project is not None else None
         self.arxiv = Arxiv()
+        self.math = MathEngine()
         self.ai_jobs: dict = {}
         self.ai_lock = threading.Lock()
         self.stopping = threading.Event()
@@ -2486,6 +2675,7 @@ class App:
             self.watcher.stop_event.set()
         if self.compiler is not None:
             self.compiler.stop()
+        self.math.stop()
         self.hub.close()
         for j in jobs:
             try:
@@ -2623,6 +2813,7 @@ API_ROUTES = {
     "/api/arxiv": {"GET": "api_arxiv"},
     "/api/cite": {"POST": "api_cite"},
     "/api/wordcount": {"POST": "api_wordcount"},
+    "/api/calc": {"GET": "api_calc_status", "POST": "api_calc"},
     "/api/open-pdf": {"POST": "api_open_pdf"},
     "/api/clean": {"POST": "api_clean"},
     # docs/ARCHITECTURE.md
@@ -3646,6 +3837,23 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(500, "texcount failed: " + proc.stderr.decode("utf-8", "replace").strip()[-500:])
         m = re.search(r"^Words in text:\s*(\d+)", text, re.M) or re.search(r"^Sum count:\s*(\d+)", text, re.M)
         return {"words": int(m.group(1)) if m else 0, "text": text}
+
+    def api_calc_status(self, q, body):
+        return self.app.math.status()
+
+    def api_calc(self, q, body):
+        """The value of a LaTeX formula, for the editor's "=" suggestions: {latex} -> {ok, result}.
+        {warm: true} starts the SymPy worker ahead of time and answers like GET."""
+        if not isinstance(body, dict):
+            raise ApiError(400, "Expected a JSON object.")
+        if body.get("warm"):
+            return self.app.math.status()
+        latex = body.get("latex")
+        if not isinstance(latex, str) or not latex.strip():
+            raise ApiError(400, "latex must be a non-empty string.")
+        if len(latex) > 4000:
+            return {"ok": True, "result": None}
+        return self.app.math.compute(latex)
 
     def api_open_pdf(self, q, body):
         proj = self.app.project

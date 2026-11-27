@@ -2403,6 +2403,14 @@
         if (!delays.includes(am)) delays.push(am);
         delays.sort((a, b) => a - b);
         els.autosave = select("set-autosave", delays.map((d) => ({ value: d, label: d < 1000 ? `${d} ms` : `${d / 1000} s` })), am);
+        els.calc = h("input", { type: "checkbox", class: "app-switch", id: "set-calc", role: "switch" });
+        els.calc.checked = s.mathResults !== false;
+        els.calcHint = h("span", null, "Type = after a formula to see its value; Tab inserts it");
+        api.get("/api/calc").then((st) => {
+          if (st && st.available === false) {
+            els.calcHint.replaceChildren("Needs SymPy: ", h("code", null, st.install || "python3 -m pip install --user sympy"));
+          }
+        }).catch(() => {});
         el.append(
           h("div", { class: "app-set-section" }, "AI"),
           row("AI provider", els.provider, "Chat and AI edits run through this CLI"),
@@ -2410,7 +2418,8 @@
           h("div", { class: "app-set-section" }, "Editor"),
           row("Compile on save", els.cos, "Rebuild the PDF after each save"),
           row("Editor font size", els.font),
-          row("Autosave delay", els.autosave, "After the last keystroke"));
+          row("Autosave delay", els.autosave, "After the last keystroke"),
+          row("Results after =", els.calc, els.calcHint));
         fill();
       },
       actions: [
@@ -2420,7 +2429,7 @@
           onClick: async () => {
             const prov = els.provider.value;
             if (byId.has(prov)) model[prov] = els.model.value;
-            const patch = { provider: prov, model, compileOnSave: !!els.cos.checked, fontSize: Number(els.font.value), autosaveMs: Number(els.autosave.value) };
+            const patch = { provider: prov, model, compileOnSave: !!els.cos.checked, fontSize: Number(els.font.value), autosaveMs: Number(els.autosave.value), mathResults: !!els.calc.checked };
             if (!els.effortRow.hidden) patch.effort = els.effort.value;
             const full = await api.put("/api/settings", patch);
             const next = full && typeof full === "object" && !Array.isArray(full) && !full.raw ? full : Object.assign({}, s, patch);

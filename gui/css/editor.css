@@ -212,3 +212,48 @@
   animation: texc-spin .8s linear infinite;
 }
 @keyframes texc-spin { to { transform: rotate(360deg); } }
+
+/* "=" results: ghost text after the cursor and a rendered preview below the line */
+.cm-s-texc .texc-calc-ghost {
+  color: var(--text-3);
+  cursor: pointer;
+  white-space: pre-wrap;
+}
+.cm-s-texc .texc-calc-ghost.is-approx { font-style: italic; }
+.texc-calc-card {
+  z-index: 20;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  max-width: min(560px, 90%);
+  background: var(--elev);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  font: 12px/1.4 var(--font-ui);
+  color: var(--text);
+  animation: texc-calc-in 120ms var(--ease);
+}
+.texc-calc-card.is-above { margin-top: -4px; }
+@keyframes texc-calc-in { from { opacity: 0; transform: translateY(-2px); } }
+.texc-calc-opt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+  min-height: 28px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  color: var(--text);
+}
+.texc-calc-opt:hover { background: var(--chip); }
+.texc-calc-opt:first-child { background: var(--chip); }
+.texc-calc-math { overflow-x: auto; overflow-y: hidden; max-width: 480px; padding: 2px 0; font-size: 13px; scrollbar-width: none; }
+.texc-calc-math::-webkit-scrollbar { display: none; }
+.texc-calc-math .katex { font-size: 1.08em; }
+.texc-calc-opt .texc-kbd { flex: none; font-size: 11px; color: var(--text-2); opacity: .8; }
+.texc-calc-note { padding: 0 8px 3px; color: var(--text-2); font-size: 11.5px; }
+.texc-calc-note .katex { font-size: 1em; }

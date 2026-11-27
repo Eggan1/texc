@@ -1,5 +1,7 @@
 // Headless Chrome driver: no visible window, nothing in the user's own Chrome.
-//   node cdp.mjs URL [--wait MS] [--size W,H] [--eval 'async function body; return value']... [--shot OUT.png]
+//   node cdp.mjs URL [--wait MS] [--size W,H] STEP... where the steps run in order:
+//     --eval 'async function body; return value'   --type TEXT (real key events, one per character)
+//     --key Tab|Escape|Enter|Alt+Tab|…             --sleep MS            --shot OUT.png
 // Prints one JSON object: {evals:[…], console:[errors/warnings], exceptions:[…]}.
 import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
@@ -8,12 +10,19 @@ import { join } from 'node:path';
 
 const a = process.argv.slice(2);
 const url = a[0];
-const evals = []; let shot = null, wait = 1500, size = '1440,900';
+const steps = []; let wait = 1500, size = '1440,900';
 for (let i = 1; i < a.length; i++) {
-  if (a[i] === '--eval') evals.push(a[++i]);
-  else if (a[i] === '--shot') shot = a[++i];
-  else if (a[i] === '--wait') wait = +a[++i];
+  if (a[i] === '--wait') wait = +a[++i];
   else if (a[i] === '--size') size = a[++i];
+  else if (['--eval', '--shot', '--type', '--key', '--sleep'].includes(a[i])) steps.push([a[i].slice(2), a[++i]]);
+}
+const KEYS = { Tab: ['Tab', 9], Escape: ['Escape', 27], Enter: ['Enter', 13], Backspace: ['Backspace', 8],
+  ArrowLeft: ['ArrowLeft', 37], ArrowRight: ['ArrowRight', 39], ArrowUp: ['ArrowUp', 38], ArrowDown: ['ArrowDown', 40] };
+const MODS = { Alt: 1, Ctrl: 2, Meta: 4, Cmd: 4, Shift: 8 };
+function charKey(ch) {
+  const code = /[a-z]/i.test(ch) ? 'Key' + ch.toUpperCase() : /\d/.test(ch) ? 'Digit' + ch
+    : ({ '=': 'Equal', ' ': 'Space', '-': 'Minus', '+': 'Equal', '^': 'Digit6', '\\': 'Backslash', '{': 'BracketLeft', '}': 'BracketRight', '$': 'Digit4' })[ch] || '';
+  return { key: ch, code, text: ch, unmodifiedText: ch, windowsVirtualKeyCode: ch === '=' ? 187 : ch.toUpperCase().charCodeAt(0) };
 }
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const prof = mkdtempSync(join(tmpdir(), 'texc-cdp-'));
@@ -51,11 +60,31 @@ async function main() {
   await send('Page.navigate', { url });
   await Promise.race([loadP, sleep(15000)]);
   await sleep(wait);
-  for (const body of evals) {
-    const r = await send('Runtime.evaluate', { expression: `(async () => { ${body} })()`, awaitPromise: true, returnByValue: true, timeout: 60000 });
-    out.evals.push(r.exceptionDetails ? { error: r.exceptionDetails.exception?.description || r.exceptionDetails.text } : { value: r.result.value });
+  for (const [kind, arg] of steps) {
+    if (kind === 'eval') {
+      const r = await send('Runtime.evaluate', { expression: `(async () => { ${arg} })()`, awaitPromise: true, returnByValue: true, timeout: 60000 });
+      out.evals.push(r.exceptionDetails ? { error: r.exceptionDetails.exception?.description || r.exceptionDetails.text } : { value: r.result.value });
+    } else if (kind === 'type') {
+      for (const ch of arg) {
+        const k = charKey(ch);
+        await send('Input.dispatchKeyEvent', { type: 'keyDown', ...k });
+        await send('Input.dispatchKeyEvent', { type: 'keyUp', key: k.key, code: k.code, windowsVirtualKeyCode: k.windowsVirtualKeyCode });
+      }
+    } else if (kind === 'key') {
+      const parts = arg.split('+');
+      const name = parts.pop();
+      const modifiers = parts.reduce((m, p) => m | (MODS[p] || 0), 0);
+      const [key, vk] = KEYS[name] || [name, name.toUpperCase().charCodeAt(0)];
+      await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code: key, windowsVirtualKeyCode: vk, modifiers });
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: vk, modifiers });
+    } else if (kind === 'sleep') {
+      await sleep(+arg);
+    } else if (kind === 'shot') {
+      const r = await send('Page.captureScreenshot', { format: 'png' });
+      writeFileSync(arg, Buffer.from(r.data, 'base64'));
+      out.shot = arg;
+    }
   }
-  if (shot) { const r = await send('Page.captureScreenshot', { format: 'png' }); writeFileSync(shot, Buffer.from(r.data, 'base64')); out.shot = shot; }
 }
 main().then(() => 0, (e) => { out.error = String(e && e.message || e); return 1; }).then((rc) => {
   console.log(JSON.stringify(out, null, 1));
