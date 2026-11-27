@@ -22,6 +22,11 @@ optional AI assistant talks to the internet.
   (double-click the PDF to go to the source).
 - **AI edits you can review.** Ask Claude about your paper or select text and press ⌘K. Proposed changes appear in the
   editor as red/green hunks; press **Keep (⌥Y)** or **Undo (⌥N)** for each one. Nothing changes without your say-so.
+- **Results after `=`.** Type `=` after a formula in math mode and its value appears as ghost text, with a
+  rendered preview. **Tab** inserts it, **⌥Tab** inserts the decimal, and any other key dismisses it. This covers
+  arithmetic, fractions, roots, trig and logs, integrals, derivatives, limits, sums and products, and matrices
+  (inverse, transpose, determinant). For example, `\int_0^1 x^2\,dx =` offers `\frac{1}{3}` and `\sqrt{2} =` offers
+  `\approx 1.414213562`. It runs locally with [SymPy](https://www.sympy.org).
 - **Writing tools.** Literature search on arXiv with one-click BibTeX, word count, "fix errors with AI", a
   proofreading pass, and math preview in the chat.
 - **Offline-friendly.** Editing, compiling and previewing never need the internet.
@@ -32,7 +37,8 @@ optional AI assistant talks to the internet.
 
 - macOS 13 or later
 - A TeX distribution with `latexmk`: [MacTeX](https://tug.org/mactex/), or `brew install --cask mactex-no-gui`
-- Python 3.9+ (the system `/usr/bin/python3` is fine; texc uses only the standard library)
+- Python 3.9+ (the system `/usr/bin/python3` is fine; texc itself uses only the standard library)
+- Optional, for results after `=`: SymPy (`/usr/bin/python3 -m pip install --user sympy`)
 - Xcode Command Line Tools (`xcode-select --install`), to build the app
 - Optional, for the AI assistant: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), signed in (`claude`).
   The OpenAI Codex CLI also works as an alternative provider.
@@ -62,7 +68,15 @@ permission once. Click Allow.
 | `texc --clean` | Remove build files (they live in a hidden `.texc/` folder) |
 
 In the app: **⌘S** saves and compiles, **⌘↵** compiles, **⌘K** asks AI about the selection, **⌘F** finds, and **☰**
-opens the file drawer with its folder menu. The AI model (Claude: default/opus/sonnet/haiku) is under **Tools → Settings**.
+opens the file drawer with its folder menu. The AI model (Claude: default/opus/sonnet/haiku) and the "Results after ="
+switch are under **Tools → Settings**.
+
+How `=` results read your math:
+- `\log` is the natural log (use `\log_{10}` for base 10).
+- `i` and `e` are the imaginary unit and Euler's number, except as a sum index.
+- `x^23` is read the way TeX typesets it (x² times 3), so write `x^{23}`.
+- Names before brackets, like `f(x)`, `P(A)`, `\sigma(z)` or `\mathbb{E}[X]`, are functions whose values texc doesn't know, so they get no result. So does `x_i` inside `\sum_i`.
+- A rounded decimal turns the `=` into `\approx` when you insert it.
 
 ## Privacy
 
@@ -82,6 +96,7 @@ processes, HTTP API, bridge and test tools.
 - No build step for the front end: edit `gui/` and reload the window (View → Reload Page, ⇧⌘R).
 - Rebuild the app after changing `app/texc.swift`: `bash app/build.sh`.
 - End-to-end check, which runs the app invisibly in automation mode: `python3 app/test/final_check.py`.
+- Checks for the `=` results (math table, server, typing in headless Chrome): `python3 app/test/calc_check.py`.
 
 ## License
 

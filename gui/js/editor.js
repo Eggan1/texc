@@ -369,6 +369,8 @@
 
   function showEntry(entry) {
     hideState();
+    if (calc) hideCalc();
+    if (isTexPath(entry.path)) warmCalc();
     if (current !== entry) {
       current = entry;
       cm.swapDoc(entry.doc);
@@ -1676,8 +1678,291 @@
     if (CMD_CTX.test(before) || ARG_CONTEXTS.some((re) => re.test(before))) startHint(cmi);
   }
 
+  // ------------------------------------------------------------------ "=" results
+  // Typing "=" after a formula in math ($…$, \(…\), \[…\], $$…$$ or an equation/align-like
+  // environment) asks the server for the value of the left-hand side (SymPy, mathcalc.py) and
+  // shows it as ghost text after the cursor, with a rendered preview below the line.
+  // Tab inserts it, ⌥Tab the decimal alternative; any other key, click or edit dismisses it.
+  // Nothing is written into the document until it is accepted.
+  const CALC_ENVS = new Set(["equation", "equation*", "align", "align*", "gather", "gather*", "multline",
+    "multline*", "flalign", "flalign*", "alignat", "alignat*", "eqnarray", "eqnarray*", "math",
+    "displaymath", "dmath", "dmath*", "split", "aligned", "gathered"]);
+  const CALC_TEXT = new Set(["text", "textrm", "textit", "textbf", "textsf", "texttt", "mbox", "hbox",
+    "intertext", "shortintertext", "label", "tag", "ref", "eqref", "cite", "emph"]);
+  // relations and breaks that end a left-hand side (top level only)
+  const CALC_SEP_CMDS = new Set(["le", "leq", "ge", "geq", "ne", "neq", "approx", "equiv", "sim", "simeq",
+    "cong", "propto", "implies", "iff", "Rightarrow", "Leftrightarrow", "Longrightarrow", "longrightarrow",
+    "Leftarrow", "mapsto", "quad", "qquad", "colon", "coloneqq", "in", "notin", "subset", "subseteq",
+    "supset", "land", "lor", "wedge", "vee", "leqslant", "geqslant", "ll", "gg", "pm", "mp", "text",
+    "nonumber", "notag"]);
+  // after the "=", only the end of the formula may follow on the line
+  const CALC_AFTER = /^\s*(?:$|\$|\\\]|\\\)|\\\\|&|%|\\end\b|\\label\b|\\tag\b|\\nonumber\b|\\notag\b|[.,;]\s*(?:$|\$|\\\]|\\\)))/;
+  let calc = null; // { entry, pos, bm, card, r, spaced }
+  let calcSeq = 0, calcRev = 0, calcAvailable = null, calcWarm = false;
+
+  function calcEnabled() {
+    const s = T.state && T.state.settings;
+    return !(s && s.mathResults === false) && calcAvailable !== false;
+  }
+  function isTexPath(p) { return /\.(tex|ltx)$/i.test(p || ""); }
+
+  // Where the math the cursor is in starts (a document index), or -1 if it is not in math.
+  // Math never spans a blank line, so the scan starts at the paragraph.
+  function mathStart(doc, pos) {
+    let l = pos.line;
+    const stop = Math.max(0, pos.line - 300);
+    while (l > stop && doc.getLine(l - 1).trim() !== "") l--;
+    const text = doc.getRange(Pos(l, 0), pos);
+    const base = doc.indexFromPos(Pos(l, 0));
+    const stack = [];
+    const inMath = () => stack.length > 0 && stack[stack.length - 1].math;
+    const n = text.length;
+    let i = 0;
+    while (i < n) {
+      const c = text[i];
+      if (c === "%") {
+        const j = text.indexOf("\n", i);
+        if (j < 0) return -1; // the cursor is in a comment
+        i = j + 1;
+        continue;
+      }
+      if (c === "\\") {
+        const m = /^\\([A-Za-z]+|[^A-Za-z]?)/.exec(text.slice(i, i + 64));
+        const name = m[1];
+        let j = i + m[0].length;
+        if (name === "(" || name === "[") {
+          if (!inMath()) stack.push({ math: true, close: name === "(" ? ")" : "]", start: j });
+        } else if (name === ")" || name === "]") {
+          const top = stack[stack.length - 1];
+          if (top && top.close === name) stack.pop();
+        } else if (name === "begin" || name === "end") {
+          const em = /^\s*\{([^{}]*)\}/.exec(text.slice(j, j + 80));
+          if (em) {
+            const env = em[1].trim();
+            j += em[0].length;
+            if (name === "begin" && CALC_ENVS.has(env) && !inMath()) {
+              if (/^alignat\*?$/.test(env)) { const a = /^\s*\{[^{}]*\}/.exec(text.slice(j, j + 20)); if (a) j += a[0].length; }
+              stack.push({ math: true, close: "env:" + env, start: j });
+            } else if (name === "end") {
+              const top = stack[stack.length - 1];
+              if (top && top.close === "env:" + env) stack.pop();
+            }
+          }
+        } else if (inMath() && CALC_TEXT.has(name)) {
+          // \text{…} inside math: skip it, or stop if the cursor is inside it
+          let k = j;
+          while (k < n && /\s/.test(text[k])) k++;
+          if (text[k] === "{") {
+            let depth = 0;
+            for (; k < n; k++) {
+              if (text[k] === "\\") { k++; continue; }
+              if (text[k] === "{") depth++;
+              else if (text[k] === "}" && --depth === 0) break;
+            }
+            if (k >= n) return -1;
+            j = k + 1;
+          }
+        }
+        i = j;
+        continue;
+      }
+      if (c === "$") {
+        const dbl = text[i + 1] === "$";
+        const close = dbl ? "$$" : "$";
+        const top = stack[stack.length - 1];
+        if (top && top.close === close) stack.pop();
+        else if (!inMath()) stack.push({ math: true, close, start: i + close.length });
+        i += close.length;
+        continue;
+      }
+      i++;
+    }
+    return inMath() ? base + stack[stack.length - 1].start : -1;
+  }
+
+  // The left-hand side: the formula after the last top-level relation, &, \\, comma or \text{}.
+  function calcLhs(src) {
+    src = src.replace(/&\s*$/, ""); // align: "\int_0^1 x\,dx &=" means the part before the &
+    let depth = 0, cut = 0;
+    const n = src.length;
+    for (let i = 0; i < n; i++) {
+      const c = src[i];
+      if (c === "%") { const j = src.indexOf("\n", i); if (j < 0) break; i = j; continue; }
+      if (c === "\\") {
+        const m = /^\\([A-Za-z]+|[^A-Za-z]?)/.exec(src.slice(i, i + 64));
+        const name = m[1];
+        let end = i + m[0].length;
+        if (name === "begin" || name === "left") depth++;
+        else if ((name === "end" || name === "right") && depth > 0) depth--;
+        else if (name === "\\" && depth === 0) cut = end;
+        else if (depth === 0 && CALC_SEP_CMDS.has(name)) {
+          if (CALC_TEXT.has(name) || name === "text") { // skip its {…}
+            let k = end, d = 0;
+            while (k < n && /\s/.test(src[k])) k++;
+            if (src[k] === "{") { for (; k < n; k++) { if (src[k] === "{") d++; else if (src[k] === "}" && --d === 0) break; } end = Math.min(n, k + 1); }
+          }
+          cut = end;
+        } else if (depth === 0 && CALC_TEXT.has(name)) {
+          let k = end, d = 0;
+          while (k < n && /\s/.test(src[k])) k++;
+          if (src[k] === "{") { for (; k < n; k++) { if (src[k] === "{") d++; else if (src[k] === "}" && --d === 0) break; } end = Math.min(n, k + 1); }
+          cut = end;
+        }
+        if (name === "begin" || name === "end") { const em = /^\s*\{[^{}]*\}/.exec(src.slice(end, end + 80)); if (em) end += em[0].length; }
+        i = end - 1;
+        continue;
+      }
+      if (c === "{" || c === "(") depth++;
+      else if ((c === "}" || c === ")") && depth > 0) depth--;
+      else if (depth === 0 && "=&<>,;".includes(c)) cut = i + 1;
+    }
+    return src.slice(cut).trim();
+  }
+
+  function onChangesForCalc(cmi, changes) {
+    calcRev++;
+    if (calc) hideCalc();
+    if (!current || !isTexPath(current.path) || !calcEnabled()) return;
+    if (changes.length !== 1) return;
+    const ch = changes[0];
+    if ((ch.origin !== "+input" && ch.origin !== "*compose") || ch.text.length !== 1 || ch.text[0] !== "=") return;
+    if (cmi.listSelections().length !== 1 || cmi.somethingSelected()) return;
+    const cur = cmi.getCursor();
+    const line = cmi.getLine(cur.line);
+    if (line[cur.ch - 1] !== "=") return;
+    const prev = line[cur.ch - 2] || "";
+    if (/[=<>!:\\]/.test(prev)) return; // ==, <=, :=, \= …
+    if (!CALC_AFTER.test(line.slice(cur.ch))) return;
+    const doc = current.doc;
+    const eq = Pos(cur.line, cur.ch - 1);
+    const start = mathStart(doc, eq);
+    if (start < 0) return;
+    const lhs = calcLhs(doc.getRange(doc.posFromIndex(start), eq));
+    // a bare name or number (x =, y_1 =, 2 =) has nothing to compute
+    if (!lhs || lhs.length > 3000 || /^(?:[A-Za-z]|\\[A-Za-z]+)(?:_\{?\w+\}?)?$|^\d+(?:\.\d+)?$/.test(lhs)) return;
+    requestCalc(current, Pos(cur.line, cur.ch), lhs, /\s/.test(prev));
+  }
+
+  function requestCalc(entry, pos, lhs, spaced) {
+    const id = ++calcSeq;
+    const rev = calcRev;
+    T.api.post("/api/calc", { latex: lhs }).then((res) => {
+      if (!res) return;
+      if (res.available === false) { calcAvailable = false; return; }
+      if (id !== calcSeq || rev !== calcRev || current !== entry || !cm || !res.ok || !res.result) return;
+      if (cmp(entry.doc.getCursor(), pos) !== 0 || entry.doc.somethingSelected() || !cm.hasFocus()) return;
+      showCalc(entry, pos, res.result, spaced);
+    }).catch(() => {});
+  }
+
+  function renderMath(el, tex) {
+    if (window.katex) {
+      try { window.katex.render(tex, el, { throwOnError: false, displayMode: false, output: "html" }); return; } catch (_) { /* plain text below */ }
+    }
+    el.textContent = tex;
+  }
+
+  function showCalc(entry, pos, r, spaced) {
+    hideCalc();
+    const lead = spaced ? " " : "";
+    const ghost = document.createElement("span");
+    ghost.className = "texc-calc-ghost" + (r.approx ? " is-approx" : "");
+    ghost.textContent = (r.approx ? " ≈ " : lead) + r.latex;
+    ghost.title = "Tab to insert";
+    const bm = entry.doc.setBookmark(pos, { widget: ghost, insertLeft: true, handleMouseEvents: true });
+
+    const card = document.createElement("div");
+    card.className = "texc-calc-card";
+    const main = document.createElement("button");
+    main.type = "button";
+    main.className = "texc-calc-opt";
+    const mathEl = document.createElement("span");
+    mathEl.className = "texc-calc-math";
+    renderMath(mathEl, "\\displaystyle " + (r.approx ? "\\approx " : "= ") + r.latex);
+    main.append(mathEl, kbdEl("⇥"));
+    card.append(main);
+    if (r.alt) {
+      const alt = document.createElement("button");
+      alt.type = "button";
+      alt.className = "texc-calc-opt texc-calc-alt";
+      const am = document.createElement("span");
+      am.className = "texc-calc-math";
+      renderMath(am, "\\displaystyle " + (r.alt.approx ? "\\approx " : "= ") + r.alt.latex);
+      alt.append(am, kbdEl(IS_MAC ? "⌥⇥" : "Alt+⇥"));
+      alt.addEventListener("mousedown", (e) => { e.preventDefault(); acceptCalc(true); });
+      card.append(alt);
+    }
+    if (r.note) {
+      const note = document.createElement("div");
+      note.className = "texc-calc-note";
+      const m = /^assuming (.+)$/.exec(String(r.note));
+      if (m) renderMath(note, "\\text{assuming }" + m[1]);
+      else note.textContent = r.note;
+      card.append(note);
+    }
+    main.addEventListener("mousedown", (e) => { e.preventDefault(); acceptCalc(false); });
+    ghost.addEventListener("mousedown", (e) => { e.preventDefault(); acceptCalc(false); });
+    card.addEventListener("mousedown", (e) => e.preventDefault()); // keep the editor focused
+    cm.addWidget(pos, card, false, "near");
+    // Below the line unless that is out of sight (the docked chat covers the editor's bottom).
+    const wr = wrapper.getBoundingClientRect(), cr = card.getBoundingClientRect();
+    if (cr.bottom > wr.bottom - 4) {
+      card.remove();
+      card.classList.add("is-above");
+      cm.addWidget(pos, card, false, "above");
+    }
+    calc = { entry, pos, bm, card, r, spaced };
+  }
+  function kbdEl(text) {
+    const k = document.createElement("span");
+    k.className = "texc-kbd";
+    k.textContent = text;
+    return k;
+  }
+
+  function hideCalc() {
+    const c = calc;
+    if (!c) return;
+    calc = null;
+    try { c.bm.clear(); } catch (_) { /* the doc is gone */ }
+    if (c.card.parentNode) c.card.parentNode.removeChild(c.card);
+  }
+
+  function acceptCalc(useAlt) {
+    const c = calc;
+    if (!c) return false;
+    const pick = useAlt ? c.r.alt : c.r;
+    if (!pick) return false;
+    hideCalc();
+    const doc = c.entry.doc;
+    if (c.entry !== current || cmp(doc.getCursor(), c.pos) !== 0) return false;
+    const eq = Pos(c.pos.line, c.pos.ch - 1);
+    const lead = c.spaced ? " " : "";
+    if (pick.approx && doc.getRange(eq, c.pos) === "=") {
+      // a rounded decimal: the "=" becomes \approx
+      doc.replaceRange("\\approx" + lead + pick.latex, eq, c.pos, "+calc");
+    } else {
+      doc.replaceRange(lead + pick.latex, c.pos, c.pos, "+calc");
+    }
+    T.bus.emit("editor:calc", { latex: pick.latex, approx: !!pick.approx });
+    return true;
+  }
+
+  function warmCalc() {
+    if (calcWarm || !calcEnabled()) return;
+    calcWarm = true;
+    setTimeout(() => {
+      T.api.post("/api/calc", { warm: true }).then((s) => { if (s) calcAvailable = !!s.available; }).catch(() => {});
+    }, 1500);
+  }
+
   // ------------------------------------------------------------------ keyboard
   function onCmKeyDown(cmi, e) {
+    if (calc && e.key === "Escape") {
+      e.preventDefault();
+      hideCalc();
+      return;
+    }
     if (e.altKey && !e.metaKey && !e.ctrlKey && (e.code === "KeyY" || e.code === "KeyN")) {
       if (!current || !current.hunks.length) return; // nothing to review: let the key type
       e.preventDefault();
@@ -1756,10 +2041,12 @@
     const k = {
       "Ctrl-Space": (cmi) => cmi.showHint(HINT_OPTIONS),
       Tab: (cmi) => {
+        if (acceptCalc(false)) return;
         if (cmi.somethingSelected() && cmi.getSelection().indexOf("\n") >= 0) cmi.indentSelection("add");
         else cmi.replaceSelection(" ".repeat(cmi.getOption("indentUnit")), "end", "+input");
       },
       "Shift-Tab": "indentLess",
+      "Alt-Tab": (cmi) => (acceptCalc(true) ? undefined : CM.Pass),
     };
     if (IS_MAC) {
       Object.assign(k, { "Cmd-F": "findPersistent", "Cmd-G": "findPersistentNext", "Shift-Cmd-G": "findPersistentPrev", "Cmd-Alt-F": "replace", "Cmd-/": toggleComment, "Ctrl-G": "jumpToLine" });
@@ -1913,6 +2200,9 @@
     cm.on("keydown", onCmKeyDown);
     cm.on("beforeChange", onBeforeChange);
     cm.on("changes", onChangesForHint);
+    cm.on("changes", onChangesForCalc);
+    cm.on("cursorActivity", () => { if (calc && (calc.entry !== current || cmp(cm.getCursor(), calc.pos) !== 0 || cm.somethingSelected())) hideCalc(); });
+    cm.on("blur", () => hideCalc());
     cm.on("cursorActivity", () => scheduleSelection());
     document.addEventListener("keydown", onDocKeyDown, true);
 
@@ -1978,6 +2268,8 @@
     },
     // extras
     revealHunk,
+    calcSuggestion: () => (calc ? { latex: calc.r.latex, approx: !!calc.r.approx, alt: calc.r.alt || null, note: calc.r.note || null } : null),
+    acceptCalc,
     focus() { if (cm) cm.focus(); },
     get cm() { return cm; },
   };
