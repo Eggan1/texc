@@ -8,11 +8,14 @@ It returns the result as LaTeX, or None when there is nothing worth showing (pla
 `f(x)` or `y`, text, or anything it can't read).
 
 `python3 mathcalc.py --worker` is the long-lived JSON-lines process the GUI server talks to:
-one {"id", "latex", "decls"?} object per line in, one {"id", "ok", "result"} line out. "decls" are
-the document's distribution declarations before the cursor ({"name": "X", "dist": "N(0, 1)"}, from
-`X \\sim N(0, 1)`), so `P(X \\le 1.96)` and `\\operatorname{Var}(2X)` have values. It needs SymPy
-(https://www.sympy.org); the rest of texc doesn't. `python3 mathcalc.py '2^{10}'` prints a result.
-Python 3.9+.
+one {"id", "latex", "decls"?, "chain"?} object per line in, one {"id", "ok", "result"} line out.
+"decls" are the document's distribution declarations before the cursor ({"name": "X", "dist":
+"N(0, 1)"}, from `X \\sim N(0, 1)`), so `P(X \\le 1.96)` and `\\operatorname{Var}(2X)` have values.
+"chain" holds the earlier sides of a chain of equalities, `A = B = C =` sends C with ["A", "B"]:
+the result is still C's value, or A's when C can't be read, with a warning when the two differ.
+It needs SymPy (https://www.sympy.org); the rest of texc doesn't. `python3 mathcalc.py '2^{10}'`
+prints a result; `--chain 'A'` before a formula gives it an earlier side, `--decl 'X \\sim N(0, 1)'`
+a declaration. Python 3.9+.
 """
 
 from __future__ import annotations
@@ -28,10 +31,15 @@ sp = None                      # sympy, imported by load()
 
 STEP_SECONDS = 2.5             # each heavy step (doit, simplify, N) stops after this long
 TOTAL_SECONDS = 4.0            # and a whole request after this long (the server kills at 6 s)
+CHAIN_SECONDS = 2.0            # the earlier sides of a chain get this long once the last has a result,
+CHAIN_MARGIN = 0.3             # and always stop this long before the request would
+MAX_CHAIN = 8                  # earlier sides kept
+CHAIN_TRIES = 4                # ... and how many of them are tried for a value
 MAX_INPUT = 4000
 MAX_LATEX_OUT = 600            # longer exact results are dropped (a decimal may still be shown)
 MAX_POW_BITS = 200_000         # bigger integer powers stay unevaluated and are shown as decimals
 MAX_FACTORIAL = 3000
+MAX_ALT_DENOMINATOR = 10000    # a decimal result also offers its fraction up to this denominator
 
 
 def load():
@@ -269,7 +277,7 @@ class Parser:
         self.abs_depth = 0
         self.limit_point = 0
         self.limit_dir = None
-        self.flags = set()         # decimal, calculus, indefinite, matrix-op, huge, stats, numeric
+        self.flags = set()         # decimal, calculus, indefinite, matrix-op, huge, stats, numeric, evaluated
         self.env = None            # the matrix environment of the input, for the output
         self.decls = decls or {}   # random variables declared in the document: name -> Dist
         self.rv_mode = 0           # inside P(…), E[…], Var(…): declared names are random variables
@@ -354,6 +362,7 @@ class Parser:
     def expr(self):
         frame = self.top()
         node = self.term()
+        done = None                                       # once a bar has come: everything up to the last term
         while not self.closed(frame):
             tk = self.peek()
             if tk.is_("sym", "+") or tk.is_("sym", "-"):
@@ -361,10 +370,17 @@ class Parser:
                 rhs = self.term()
                 if isinstance(node, sp.MatrixBase) or isinstance(rhs, sp.MatrixBase):
                     self.flags.add("matrix-op")
-                node = node + rhs if tk.val == "+" else node - rhs
+                if done is None:
+                    node = node + rhs if tk.val == "+" else node - rhs
+                else:                                     # F|_a^b + G|_a^b: a later bar takes its own term
+                    done, node = done + node, (rhs if tk.val == "+" else -rhs)
+            elif self.at_bar():                           # t^2 + t \Big|_0^1: all of it, between the bounds
+                self.next()
+                value = self.between(node)
+                done, node = (value if done is None else done + value), sp.Integer(0)
             else:
                 break
-        return node
+        return node if done is None else done + node
 
     def term(self):
         frame = self.top()
@@ -410,10 +426,103 @@ class Parser:
         if tk.kind in ("num", "let"):
             return True
         if tk.kind == "sym":
-            return tk.val in "([{" or (tk.val == "|" and self.abs_depth == 0 and not self.event_depth)
+            return tk.val in "([{" or (tk.val == "|" and self.abs_depth == 0 and not self.event_depth
+                                       and not self.at_bar())
         if tk.is_("cmd", "|"):
             return not self.norm_depth
         return tk.kind == "cmd" and (tk.val in FACTOR_CMDS or tk.val == "Pr")
+
+    # -- evaluation between bounds: [F]_a^b and F \Big|_a^b are F(b) - F(a)
+    def at_bar(self):
+        """At a | with a script after it, outside |…| and P(… | …): an evaluation bar, not an absolute value."""
+        return (self.at("sym", "|") and self.abs_depth == 0 and not self.event_depth
+                and (self.at("sym", "_", 1) or self.at("sym", "^", 1)))
+
+    def at_bounds(self):
+        """At _a^b or ^b_a after a ]: both scripts. A lone ^ is a power, [x+1]^2."""
+        if self.at("sym", "_"):
+            return True
+        if not self.at("sym", "^"):
+            return False
+        k = 1
+        if self.at("sym", "{", k):
+            depth = 0
+            while True:
+                tk = self.peek(k)
+                if tk.kind == "end":
+                    return False
+                if tk.is_("sym", "{"):
+                    depth += 1
+                elif tk.is_("sym", "}"):
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k += 1
+        elif self.peek(k).kind == "end" or (self.peek(k).kind == "num" and len(self.peek(k).val) > 1):
+            return False
+        return self.at("sym", "_", k + 1)
+
+    def one_bound(self):
+        """One bound: (variable or None, value). _{t=0} names the variable, _0 leaves it open."""
+        named = self.at("let", None, 1) or (self.peek(1).kind == "cmd" and self.peek(1).val in GREEK)
+        if self.at("sym", "{") and named and self.at("sym", "=", 2):
+            var = sp.Symbol(self.peek(1).val)
+            self.i += 3
+            return var, self.grouped("sym", "}")
+        return None, self.script()
+
+    def between(self, f):
+        """The bounds after [F] or F|, and F at the upper one minus F at the lower one."""
+        lo = hi = var = None
+        for _ in range(2):
+            if self.at("sym", "_") and lo is None:
+                self.next()
+                v, lo = self.one_bound()
+            elif self.at("sym", "^") and hi is None:
+                self.next()
+                v, hi = self.one_bound()
+            else:
+                break
+            if v is not None:
+                if var is not None and v != var:
+                    raise Refuse("the two bounds name different variables")
+                var = v
+        if lo is None or hi is None:
+            raise ParseError("an evaluation needs both bounds")
+        if any(isinstance(x, sp.MatrixBase) for x in (f, lo, hi)):
+            raise Refuse("a matrix between bounds")
+        f, lo, hi = sp.sympify(f), sp.sympify(lo), sp.sympify(hi)
+        if not all(isinstance(x, sp.Expr) for x in (f, lo, hi)):
+            raise Refuse("not an expression between bounds")
+        pending = (sp.Integral, sp.Derivative, sp.Sum, sp.Product, sp.Limit)
+        if f.has(*pending):                              # [\int_0^t 2s\,ds]_0^x: do the inner one first
+            if any(len(lim) == 1 for g in f.atoms(sp.Integral) for lim in g.limits):
+                raise Refuse("an antiderivative (+ C) between bounds")
+            f = step(f.doit)
+            if f is None or f.has(*pending):
+                raise Refuse("the expression between the bounds has no closed form")
+        if var is None:
+            free = sorted(f.free_symbols, key=lambda s: s.name)
+            if len(free) > 1:                            # [x t^2]_0^x: the one the bounds don't use
+                used = lo.free_symbols | hi.free_symbols
+                free = [s for s in free if s not in used]
+            if len(free) != 1:
+                raise Refuse("which variable the bounds are for isn't clear")
+            var = free[0]
+        self.check_indexed(f, [var])
+        self.flags.add("evaluated")
+        return self.value_at(f, var, hi, "-") - self.value_at(f, var, lo, "+")
+
+    def value_at(self, f, var, point, side):
+        v = f.subs(var, point)
+        if v.has(sp.nan, sp.zoo, sp.AccumBounds):        # t e^{-t} at infinity, \sin(t)/t at 0: the limit
+            if point in (sp.oo, -sp.oo):
+                v = step(lambda: sp.limit(f, var, point))
+            else:
+                v = step(lambda: sp.limit(f, var, point, side))
+            if v is None or v.has(sp.nan, sp.zoo, sp.AccumBounds, sp.Limit):
+                raise Refuse("no value at the bound")
+        return v
 
     def unary(self):
         if self.at("sym", "-"):
@@ -539,13 +648,13 @@ class Parser:
             parts.append(tk.val if tk.kind != "cmd" else "\\" + tk.val + " ")
         return "".join(str(p) for p in parts).strip()
 
-    def symbol(self, name, applied_ok=False):
-        """A variable, with an optional subscript: x, x_1, a_{ij}, \\alpha_0.
+    def symbol(self, name, applied_ok=False, sub=True):
+        """A variable, with an optional subscript: x, x_1, a_{ij}, \\alpha_0 (sub=False: never one).
 
         Refuses what would be read wrongly: x_i under \\sum_i (the index is bound, a plain symbol
         x_i would not change with it) and names applied to brackets, f(x), \\phi(x), x(t)."""
         sym_name = name
-        if self.at("sym", "_"):
+        if sub and self.at("sym", "_"):
             self.next()
             sub = self.raw_group().replace(" ", "")
             if not sub:
@@ -1056,16 +1165,17 @@ class Parser:
                 d = self.differential()
                 if d is not None:
                     return d
-            if v == "e" and "e" not in self.bound and not self.at("sym", "_"):
-                return sp.E
-            if v == "i" and "i" not in self.bound and not self.at("sym", "_"):
+            if v == "e" and "e" not in self.bound and (script or not self.at("sym", "_")):   # e_1 is a name,
+                return sp.E                                                                 # ^e_1 two scripts
+            if v == "i" and "i" not in self.bound and (script or not self.at("sym", "_")):
                 return sp.I
-            return self.symbol(v)
+            return self.symbol(v, sub=not script)         # a one-token script: \int^x_0 is ^x and _0
         if k == "sym":
             if v == "(":
                 return self.paren()
             if v == "[":
-                return self.grouped("sym", "]")
+                e = self.grouped("sym", "]")
+                return self.between(e) if self.at_bounds() else e
             if v == "{":
                 e = self.grouped("sym", "}")
                 if self.at("cmd", "choose"):
@@ -1147,7 +1257,7 @@ class Parser:
             if v in ("Gamma", "zeta") and self.at("sym", "("):
                 arg = self.grouped_paren()
                 return sp.gamma(arg) if v == "Gamma" else sp.zeta(arg)
-            return self.symbol(v)
+            return self.symbol(v, sub=not script)
         if v in DECORATIONS:
             inner = self.raw_group()
             if inner.replace(" ", "") in STAT_WORDS and self.at_bracket():     # \mathbb{E}[X], \mathbb{P}(…)
@@ -2325,19 +2435,49 @@ def evaluate(expr):
     return r, note
 
 
-def compute(latex: str, budget: float = TOTAL_SECONDS, decls=None):
+def compute(latex: str, budget: float = TOTAL_SECONDS, decls=None, chain=None):
     """The result for the left-hand side `latex`, or None. `decls`: see parse_decls.
 
     {"latex": shown/inserted LaTeX, "approx": True when it is a rounded decimal (the "=" then
      becomes \\approx), "alt": {"latex", "approx"} or None (the decimal of an exact number),
-     "note": e.g. "assuming a > 0", or what a statistics result assumes, with math in $…$; or None}"""
+     "note": e.g. "assuming a > 0", or what a statistics result assumes, with math in $…$; or None}
+
+    `chain`: the earlier sides of a chain of equalities, oldest first (`A = B = C =`: latex C,
+    chain [A, B]). The result is still C's. The first earlier side that has a value of its own
+    stands for the chain: its value is the result when C is empty or can't be read (the note says
+    whose value it is), and when C surely differs from it the note warns. Without `chain` nothing
+    changes, and whatever goes wrong in the chain part leaves C's own result."""
     load()
     src = (latex or "").strip()
-    if not src or len(src) > MAX_INPUT:
+    sides = [x.strip() for x in chain if isinstance(x, str) and x.strip() and len(x) <= MAX_INPUT // 2] \
+        if isinstance(chain, (list, tuple)) else []
+    sides = sides[-MAX_CHAIN:]
+    if len(src) > MAX_INPUT or not (src or sides):
         return None
+    t0 = time.monotonic()
     try:
         with deadline(budget):
-            return _compute(src, parse_decls(decls) if decls else {})
+            dists = parse_decls(decls) if decls else {}
+            if not sides:
+                return _compute(src, dists)
+            last, state, info = None, "empty", {}
+            if src:
+                try:
+                    last, state = _compute(src, dists, info), "ok"
+                except (ParseError, RecursionError):
+                    state = "unreadable"
+            # The last side's result is in hand; the chain gets what is left of the budget, less
+            # a margin so that its own deadline fires first and this request never ends as a timeout.
+            left = budget - (time.monotonic() - t0) - CHAIN_MARGIN
+            if last is not None:
+                left = min(left, CHAIN_SECONDS)
+            if left < 0.05:
+                return last
+            try:
+                with deadline(left):
+                    return _chained(sides, dists, last, state, info)
+            except Exception:  # noqa: BLE001 - a Timeout too: the chain is an extra
+                return last
     except Timeout:
         raise
     except (ParseError, RecursionError):
@@ -2346,13 +2486,119 @@ def compute(latex: str, budget: float = TOTAL_SECONDS, decls=None):
         return None
 
 
-def _compute(src, decls=None):
+def _chained(sides, dists, last, state, info):
+    """compute() for a chain: `last`, the last side's result (state "ok", or "empty"/"unreadable")."""
+    first = None
+    for side in sides[:CHAIN_TRIES]:                     # names (p_x, y) and final forms have no result
+        finfo = {}
+        try:
+            res = _compute(side, dists, finfo)
+        except Timeout:
+            raise
+        except Exception:  # noqa: BLE001
+            continue
+        if res is not None:
+            first = side
+            break
+    if first is None:
+        return last
+    echo = re.sub(r"\s+", " ", first)
+    echo = f"${echo}$" if len(echo) <= 70 and not re.search(r"[$%&\n]|\\\\", echo) else "the expression before it"
+    if state != "ok":
+        return res if state == "empty" else _noted(res, "the value of " + echo)
+    if not _surely_different(finfo, info):
+        return last
+    if last is None:                                     # \int_0^1 2x\,dx = 2 = : the last side is a final form
+        return _noted(res, f"⚠ the value of {echo}; the last step isn't equal to it")
+    value = ""
+    if len(res["latex"]) <= 60 and "$" not in res["latex"]:
+        value = f", which is {'about ' if res['approx'] else ''}${res['latex']}$"
+    return _noted(last, f"⚠ doesn't match {echo}{value}")
+
+
+def _noted(res, text):
+    """res with one more note; "assuming a > 0" is all math, so it gets its $…$ before text joins it."""
+    note = res.get("note")
+    if note and "$" not in note and note.startswith("assuming "):
+        note = "assuming $" + note[len("assuming "):] + "$"
+    return dict(res, note=f"{note}; {text}" if note else text)
+
+
+SAMPLES = (("0.37", "1.61", "2.9"), ("1.83", "0.59", "4.7"), ("7.3", "12.9", "0.21"), ("3", "5", "2"), ("12", "7", "23"))
+UNSURE = {"indefinite", "huge", "stats", "numeric"}
+
+
+def _surely_different(first, last):
+    """Two sides of a chain (what _compute noted about each) have values that can't be equal.
+
+    False whenever that isn't certain, since a wrong warning is worse than a missed one:
+    - different variables on the two sides (x^2 + x = 3^2 + 3 puts a value in; 2x + 3x = 10 is an
+      equation), antiderivatives, statistics, matrices, anything not fully evaluated;
+    - decimals in the last side, which may be rounded (\\sqrt{2} + 1 = 1.414 + 1), unless the first
+      side is decimal arithmetic whose every intermediate value fits the last side's decimal places;
+    - with variables: unless the two are real, finite and different at every sample point."""
+    a, b = first.get("value"), last.get("value")
+    if a is None or b is None or (first["flags"] | last["flags"]) & UNSURE:
+        return False
+    open_ = (sp.Integral, sp.Sum, sp.Product, sp.Limit, sp.Derivative, sp.Subs, sp.Piecewise, sp.Float,
+             sp.oo, -sp.oo, sp.zoo, sp.nan, sp.AccumBounds)
+    if not all(isinstance(v, sp.Expr) and not v.has(*open_) for v in (a, b)):
+        return False
+    names = sorted(a.free_symbols, key=lambda s_: s_.name)
+    if a.free_symbols != b.free_symbols or len(names) > len(SAMPLES[0]):
+        return False
+    places = [len(t.val.partition(".")[2]) for t in last["toks"] if t.kind == "num" and "." in t.val]
+    if places and (names or not _fits_decimals(first.get("plain"), max(places))):
+        return False
+
+    def apart(x, y):                                     # two numbers; None when they can't be compared
+        if x.is_Rational and y.is_Rational:
+            return x != y
+        x, y = sp.N(x, 30), sp.N(y, 30)
+        if not (x.is_Float and y.is_Float and x.is_finite and y.is_finite):
+            return None                                  # complex ((-8)^{1/3} has a real reading too) or infinite
+        return bool(abs(x - y) > sp.Float("1e-9") * max(1, abs(x), abs(y)))
+
+    if not names:
+        return apart(a, b) is True
+    for point in SAMPLES:
+        at = {n: sp.Rational(v) for n, v in zip(names, point)}
+        if apart(a.xreplace(at), b.xreplace(at)) is not True:
+            return False
+    return True
+
+
+def _fits_decimals(plain, places):
+    """`plain` (a side as written, nothing combined) is numbers with + - × ÷ and powers, and every
+    value computed on the way is a decimal of at most `places` places: nothing there needed rounding."""
+    if plain is None:
+        return False
+    scale = sp.Integer(10) ** places
+    for node in sp.preorder_traversal(plain):
+        if node.is_Atom:
+            if not (node.is_Rational and _rational_decimal(node) is not None):
+                return False
+        elif not isinstance(node, (sp.Add, sp.Mul, sp.Pow)):
+            return False
+        else:
+            v = node.doit()
+            if not (v.is_Rational and (v * scale).is_Integer):
+                return False
+    return True
+
+
+def _compute(src, decls=None, info=None):
+    """The result for src, or None. `info` (a dict) is filled with what a chain comparison needs:
+    "toks", "flags", and for an ordinary formula "value" (its evaluated SymPy value) and "plain"
+    (the formula as written, nothing combined, or None)."""
+    info = {} if info is None else info
     toks = tokenize(src)
     if not toks:
         return None
     parser = Parser(list(toks), decls)
     p = parser.parse()
     flags, env = parser.flags, parser.env
+    info.update(toks=toks, flags=flags)
     snote = "; ".join(parser.notes) or None
     if parser.pm is not None:
         return _pm_result(parser)
@@ -2373,6 +2619,7 @@ def _compute(src, decls=None):
         return res
     p = sp.sympify(p)
     if len(toks) == 1:
+        info.update(value=p, plain=p)
         return None
     if p.is_Relational or isinstance(p, sp.logic.boolalg.Boolean):
         return None
@@ -2380,9 +2627,10 @@ def _compute(src, decls=None):
         with sp.evaluate(False):
             p0 = sp.sympify(Parser(list(toks)).parse())
         computed = leaves(p0) != leaves(p)
+        info["plain"] = p0
     except Exception:  # noqa: BLE001
         computed = True
-    if flags & {"calculus", "matrix-op", "huge"}:
+    if flags & {"calculus", "matrix-op", "huge", "evaluated"}:
         computed = True
 
     r, note = p, None
@@ -2393,6 +2641,8 @@ def _compute(src, decls=None):
     unevaluated = r.has(sp.Integral, sp.Sum, sp.Product, sp.Limit, sp.Derivative)
     if unevaluated and r.free_symbols:
         return None
+    if not unevaluated:
+        info["value"] = r
 
     def trivial(c):
         return c is None or norm(to_latex(c)) == norm(src)
@@ -2441,7 +2691,10 @@ def _compute(src, decls=None):
     if "decimal" in flags or "huge" in flags or exact is None or unevaluated:
         if dec is None or norm(dec) == norm(src):
             return None
-        return {"latex": dec, "approx": not dec_exact, "alt": None, "note": note}
+        alt = None                                   # 0.7 also as \frac{7}{10}, 0.0333… as \frac{1}{30}
+        if num.is_Rational and not num.is_Integer and abs(num.q) <= MAX_ALT_DENOMINATOR and "huge" not in flags:
+            alt = {"latex": to_latex(num), "approx": False}
+        return {"latex": dec, "approx": not dec_exact, "alt": alt, "note": note}
     out = to_latex(exact)
     alt = None
     if dec is not None and norm(dec) != norm(out) and not exact.is_Integer:
@@ -2587,7 +2840,8 @@ def worker() -> int:
         except ValueError:
             continue
         try:
-            res = compute(str(req.get("latex") or ""), float(req.get("budget") or TOTAL_SECONDS), req.get("decls"))
+            res = compute(str(req.get("latex") or ""), float(req.get("budget") or TOTAL_SECONDS), req.get("decls"),
+                          req.get("chain"))
             out = {"id": rid, "ok": True, "result": res}
         except Timeout:
             out = {"id": rid, "ok": False, "error": "timeout"}
@@ -2606,16 +2860,22 @@ def main(argv=None) -> int:
         print(__doc__.strip())
         return 0
     decls = []                                   # --decl 'X \\sim N(100, 15^2)' before the formulas
+    chain = []                                   # --chain 'A' --chain 'B' 'C' is A = B = C = (one formula's worth)
     it = iter(argv)
     for a in it:
         if a == "--decl":
             name, _, dist = next(it, "").partition("\\sim")
             decls.append({"name": name, "dist": dist})
             continue
+        if a == "--chain":
+            chain.append(next(it, ""))
+            continue
+        shown = " = ".join(chain + [a])
         try:
-            print(f"{a}  =>  {json.dumps(compute(a, decls=decls), ensure_ascii=False)}")
+            print(f"{shown}  =>  {json.dumps(compute(a, decls=decls, chain=chain), ensure_ascii=False)}")
         except Timeout:
-            print(f"{a}  =>  timeout")
+            print(f"{shown}  =>  timeout")
+        chain = []
     return 0
 
 

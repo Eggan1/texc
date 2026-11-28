@@ -250,7 +250,7 @@
   color: var(--text);
 }
 .texc-calc-opt:hover { background: var(--chip); }
-.texc-calc-opt:first-child { background: var(--chip); }
+.texc-calc-opt.is-selected { background: var(--chip); }
 .texc-calc-math { overflow-x: auto; overflow-y: hidden; max-width: 480px; padding: 2px 0; font-size: 13px; scrollbar-width: none; }
 .texc-calc-math::-webkit-scrollbar { display: none; }
 .texc-calc-math .katex { font-size: 1.08em; }

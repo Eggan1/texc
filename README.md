@@ -23,12 +23,17 @@ optional AI assistant talks to the internet.
 - **AI edits you can review.** Ask Claude about your paper or select text and press ⌘K. Proposed changes appear in the
   editor as red/green hunks; press **Keep (⌥Y)** or **Undo (⌥N)** for each one. Nothing changes without your say-so.
 - **Results after `=`.** Type `=` after a formula in math mode and its value appears as ghost text, with a
-  rendered preview. **Tab** inserts it, **⌥Tab** inserts the decimal, and any other key dismisses it. This covers
+  rendered preview. **Tab** inserts it. When there are two ways to write it (a fraction and a decimal), both are listed: **↑ ↓** choose, and **Tab** or **Enter** inserts the chosen one (**⌥Tab** still inserts the second directly). Any other key dismisses it. This covers
   arithmetic, fractions, roots, trig and logs, integrals, derivatives, limits, sums and products, and matrices
   (inverse, transpose, determinant). For example, `\int_0^1 x^2\,dx =` offers `\frac{1}{3}` and `\sqrt{2} =` offers
-  `\approx 1.414213562`. It runs locally with [SymPy](https://www.sympy.org).
+  `\approx 1.414213562`. Plain arithmetic written as text works too: `$p_x$ = 0.2 + 0.1 + 2(0.05 + 0.05) =` offers
+  `0.5`, inserted as text (fractions as `1/2`). It runs locally with [SymPy](https://www.sympy.org).
+- **Step by step.** A line can carry several `=`: write the expression, expand it, and the last `=` still gives
+  the answer. `\int_0^x 2t\,dt = \left[t^2\right]_0^x =` offers `x^{2}`, in one line or continued with `&=` in
+  `align`. A step that doesn't equal the first expression gets a warning under its result:
+  `\int_0^1 x^2\,dx = \frac{1}{2} =` says it doesn't match the integral, which is `\frac{1}{3}`.
 - **Statistics and ML after `=`.** Declare a variable once, `X \sim N(100, 15^2)`, and `P(X > 130) =` offers
-  `\approx 0.02275013195`. **⌥Tab** inserts the table-style value, 0.0228. Also covered:
+  `\approx 0.02275013195`. The second row (**↓**, or **⌥Tab**) is the table-style value, 0.0228. Also covered:
   - `P(…)` with `<`, `\le`, `|X|`, ranges and `\mid`, plus `E[…]`, `\operatorname{Var}`, `SD`, `Cov` and `Corr`;
   - normal, binomial, Poisson, exponential, uniform, Bernoulli, geometric, $t$, $\chi^2$, $F$ and beta variables;
   - critical values `z_{0.025}`, `t_{0.025,10}`, `\chi^2_{0.05,3}` and `F_{0.05,2,10}`, and `\Phi(1.96)` and
@@ -83,6 +88,18 @@ switch are under **Tools → Settings**.
 
 How `=` results read your math:
 - `\log` is the natural log (use `\log_{10}` for base 10).
+- `[F]_a^b` and `F \Big|_a^b` (any bracket size, `\left. … \right|` too) are F(b) − F(a). The variable is the one
+  F has, or the one the bounds don't use (`[x t^2]_0^x` is in t); name it when that isn't clear, `[…]_{t=0}^{t=x}`.
+  `[x+1]^2` is still a power. A bar takes everything before it in its group; a second bar takes its own term
+  (`F\Big|_0^1 + G\Big|_0^1`).
+- In a chain `A = B = C =`, the result is C's value. The earlier sides matter in two cases:
+  - C is empty or can't be read (`F(x) - F(0)`): the result is the value of the first side that has one, and the
+    note says whose value it is.
+  - C surely differs from that side: the note warns. texc warns only when it is certain, so it stays quiet when
+    the sides use different variables (`2x + 3x = 10`, or a value put in for `r`), when the last side has decimals
+    that may be rounded (`\sqrt{2} + 1 = 1.414 + 1`), and for `+ C`, statistics and matrices.
+  - A chain ends at `,` `;` `\quad`, another relation (`\le`, `\approx`, `:=`) or a new `align` line that doesn't
+    start with `&=`. Names and plain numbers (`p_x = … =`, `y = 3x + 2 =`) are never the side to compare with.
 - `i` and `e` are the imaginary unit and Euler's number, except as a sum index.
 - `x^23` is read the way TeX typesets it (x² times 3), so write `x^{23}`.
 - Names before brackets, like `f(x)`, `P(A)` or `\sigma(z)`, are functions whose values texc doesn't know, so they get no result. So does `x_i` inside `\sum_i`.
@@ -99,7 +116,13 @@ How `=` results read your math:
   - Several variables are independent. Events about more than one variable are computed only when the variables are
     normal and the event is about a linear combination of them, such as `P(X - Y > 0)`.
 - Sigmoid is `\operatorname{sigmoid}`. `\sigma(z)` stays a function name, since σ is also the standard deviation.
-- A rounded decimal turns the `=` into `\approx` when you insert it.
+- A number that can be written both ways offers both: a fraction with its decimal as the second row, and a decimal
+  (from a sum with decimals) with its fraction, so `0.2 + 0.5 =` offers `0.7` and `\frac{7}{10}`.
+- A rounded decimal turns the `=` into `\approx` when you insert it (`$\approx$` outside math).
+- `=` typed right after inline math has closed, as in `$f_x = \int_0^x 2\,dy$ =`, gives that formula's value in its
+  own `$…$` (a plain number goes in as text).
+- Outside math, only plain arithmetic (numbers, `+ - * / × ÷` and brackets) counts, standing apart from the words before it
+  (`x2+3 =` and `f(2+3) =` stay quiet, and so do comments and the preamble).
 
 ## Privacy
 
@@ -119,7 +142,7 @@ processes, HTTP API, bridge and test tools.
 - No build step for the front end: edit `gui/` and reload the window (View → Reload Page, ⇧⌘R).
 - Rebuild the app after changing `app/texc.swift`: `bash app/build.sh`.
 - End-to-end check, which runs the app invisibly in automation mode: `python3 app/test/final_check.py`.
-- Checks for the `=` results (math and statistics tables, server, typing in headless Chrome): `python3 app/test/calc_check.py`.
+- Checks for the `=` results (math, statistics and chain tables, server, typing in headless Chrome): `python3 app/test/calc_check.py`.
 
 ## License
 

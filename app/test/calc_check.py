@@ -2,7 +2,7 @@
 """Checks for the editor's "=" results (mathcalc.py, /api/calc, the ghost text). Silent: headless
 Chrome, a scratch copy of the demo, a scratch config dir.
 Run: /usr/bin/python3 app/test/calc_check.py   (needs SymPy for /usr/bin/python3)"""
-import json, os, re, shutil, subprocess, sys, tempfile, time, urllib.request
+import json, os, re, shutil, subprocess, sys, tempfile, time, urllib.error, urllib.request
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 TEXC = os.path.dirname(os.path.dirname(TOOLS))
@@ -85,6 +85,26 @@ TABLE = [
     # ...while brackets that multiply still work
     (r"\frac{d}{dx} x^2 + \frac{d}{dx} x^3", r"3 x^{2} + 2 x"),
     (r"x(x+1)", r"x^{2} + x"), (r"2\pi(r+h)", r"2 \pi h + 2 \pi r"), (r"\Gamma(5)", "24"),
+    # variable limits, and an antiderivative between bounds: [F]_a^b and F|_a^b are F(b) - F(a)
+    (r"\int_0^x 2t\,dt", "x^{2}"), (r"\int_2^y 3t^2\,dt", "y^{3} - 8"), (r"\int^x_0 2t\,dt", "x^{2}"),
+    (r"\frac{d}{dx}(x^3+2x)", r"3 x^{2} + 2"), (r"\frac{d}{dx}\int_0^x t^2\,dt", "x^{2}"),
+    (r"\left[t^2\right]_0^x", "x^{2}"), (r"[t^3]_2^y", "y^{3} - 8"), (r"[t^3]^y_2", "y^{3} - 8"),
+    (r"\left. t^2 \right|_0^x", "x^{2}"), (r"t^2 \Big|_0^x", "x^{2}"),
+    (r"\frac{t^3}{3} + t \Big|_0^1", r"\frac{4}{3}"),          # the bar takes everything before it
+    (r"\left[\frac{t^2}{2}\right]_{t=0}^{t=x}", r"\frac{x^{2}}{2}"), (r"[t^2]_{t=0}^{x}", "x^{2}"),
+    (r"[x t^2]_0^x", "x^{3}"),                                 # the variable the bounds don't use
+    (r"[-e^{-t}]_0^\infty", "1"), (r"[t e^{-t}]_0^\infty", "0"), (r"\left[\ln t\right]_1^e", "1"),
+    (r"2[t^2]_0^3", "18"), (r"\left[\int_0^t 2s\,ds\right]_0^x", "x^{2}"),
+    # several bars: each later one takes its own term; e as a bound before the other script
+    (r"\frac{t^3}{3}\Big|_0^1 + \frac{t^2}{2}\Big|_0^1", r"\frac{5}{6}"),
+    (r"\frac{t^3}{3}\Big|_0^1 - \frac{t^2}{2}\Big|_0^1", r"- \frac{1}{6}"),
+    (r"\frac{t^3}{3}\Big|_0^x + \frac{t^2}{2}\Big|_0^x", r"\frac{x^{2} (2 x + 3)}{6}"),
+    (r"t^2 \Big|_0^1 + 3", "4"), (r"\int^e_1 \ln x\,dx", "1"), (r"\left[\ln t\right]^e_1", "1"),
+    (r"e_1 + e_1", r"2 e_{1}"),
+    # ...and what must not turn into one: a power, absolute values, one bound, an unclear variable
+    (r"[x+1]^2", r"x^{2} + 2 x + 1"), (r"|x-3|", None), (r"|x|^2", None), (r"[t^2]_0", None),
+    (r"t^2 \Big|_{t=2}", None), (r"[a t]_0^b", None), (r"[5]_0^1", None),
+    (r"\left[\begin{pmatrix} t \\ 1 \end{pmatrix}\right]_0^1", None), (r"\left[\int 2t\,dt\right]_0^1", None),
 ]
 APPROX = [  # (input, decimal shown, inserted with \approx?)
     (r"\sin 1", "0.8414709848", True),
@@ -96,6 +116,7 @@ APPROX = [  # (input, decimal shown, inserted with \approx?)
 ALTS = [  # (input, exact, decimal alternative)
     (r"\frac{1}{3}+\frac{1}{6}", r"\frac{1}{2}", "0.5"),
     (r"\int_0^1 e^{-x^2} dx", r"\frac{\sqrt{\pi} \operatorname{erf}(1)}{2}", "0.7468241328"),
+    (r"\Big[\frac{t^3}{3}\Big]_0^1", r"\frac{1}{3}", "0.3333333333"),
 ]
 mathcalc.load()
 bad = []
@@ -113,6 +134,17 @@ for src, exact, dec in ALTS:
     r = mathcalc.compute(src)
     if not r or r["latex"] != exact or not r["alt"] or r["alt"]["latex"] != dec:
         bad.append(f"{src} -> {r!r}")
+# both ways of writing a number: a fraction offers its decimal, a decimal offers its fraction
+BOTH = [("0.2 + 0.1 + 0.2 + 2(0.05 + 0.05)", "0.7", r"\frac{7}{10}"), ("1.5 + 2.25", "3.75", r"\frac{15}{4}"),
+        ("0.1/3", "0.03333333333", r"\frac{1}{30}"), (r"\frac{1}{3}+\frac{1}{6}", r"\frac{1}{2}", "0.5"),
+        (r"0.5 \cdot 4", "2", None), ("0.123456789 + 1", "1.123456789", None), ("2^{0.5}", "1.414213562", None)]
+bad = []
+for src, want, alt in BOTH:
+    r = mathcalc.compute(src) or {}
+    got = (r.get("latex"), (r.get("alt") or {}).get("latex"))
+    if got != (want, alt):
+        bad.append(f"{src} -> {got!r}")
+check(f"a result that can be a fraction or a decimal offers both ({len(BOTH)} formulas)", not bad, "; ".join(bad))
 r = mathcalc.compute(r"\int_0^\infty e^{-ax} dx")
 if not r or r["latex"] != r"\frac{1}{a}" or r["note"] != "assuming a > 0":
     bad.append(f"e^(-ax) -> {r!r}")
@@ -200,6 +232,72 @@ r = mathcalc.compute(r"P(X > 130)", decls=[N("X", "N(100, 15)")])
 check("N(100, 15) is read as variance 15, and the note says so",
       r and r["note"] == r"$X$ normal, mean $100$, sd $\sqrt{15}$", json.dumps(r))
 
+# 1c. Chains, A = B = C =: (earlier sides, last side, shown, note). The result is the last side's.
+#     An earlier side matters when the last one is empty or unreadable (then its value is shown) and
+#     when the two surely differ (a warning). Names (p_x, y) and final forms are never "the earlier side".
+WARN = "⚠ doesn't match "
+CHAINS = [
+    ([r"\int_0^x 2t\,dt"], r"\left[t^2\right]_0^x", "x^{2}", None),
+    ([r"\int_2^y 3t^2\,dt"], r"[t^3]_2^y", "y^{3} - 8", None),
+    ([r"\int_0^1 (t^2+t)\,dt"], r"\frac{t^3}{3}\Big|_0^1 + \frac{t^2}{2}\Big|_0^1", r"\frac{5}{6}", None),
+    ([r"\int_0^x 2t\,dt", r"\left[t^2\right]_0^x"], "", "x^{2}", None),            # an empty last side
+    (["p_x", "0.2+0.1+0.2+2(0.05+0.05)"], "0.5 + 2(0.1)", "0.7", None),
+    ([r"\frac{d}{dx}(x^3+2x)"], "3x^2 + 2", None, None),                             # final, and right
+    (["y"], "3x + 2", None, None),
+    (["0.2+0.1+0.2+2(0.05+0.05)"], "0.5+0.2", "0.7", None),
+    # a wrong step: the last side's own value, and the warning
+    ([r"\int_0^1 x^2\,dx"], r"\frac{1}{2}", "0.5", WARN + r"$\int_0^1 x^2\,dx$, which is $\frac{1}{3}$"),
+    (["0.2+0.1+0.2+2(0.05+0.05)"], "0.5+0.1", "0.6", WARN + "$0.2+0.1+0.2+2(0.05+0.05)$, which is $0.7$"),
+    ([r"\sqrt{2}"], r"\frac{3}{2} - \frac{1}{10}", r"\frac{7}{5}", WARN + r"$\sqrt{2}$, which is about $1.414213562$"),
+    ([r"\det\begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix}"], r"1 \cdot 4 + 2 \cdot 3", "10",
+     WARN + "the expression before it, which is $-2$"),
+    # a wrong step that is a final form itself: the earlier side's value, and the warning
+    ([r"\int_0^1 2x\,dx"], "2", "1", r"⚠ the value of $\int_0^1 2x\,dx$; the last step isn't equal to it"),
+    ([r"\frac{d}{dx}(x^3+2x)"], "3x^2 + 3", r"3 x^{2} + 2", r"⚠ the value of $\frac{d}{dx}(x^3+2x)$; the last step isn't equal to it"),
+    # an unreadable last side: the earlier side's value, and whose it is
+    ([r"\int_0^x 2t\,dt"], "F(x) - F(0)", "x^{2}", r"the value of $\int_0^x 2t\,dt$"),
+    ([r"\int_0^\infty e^{-ax}\,dx"], "G(a)", r"\frac{1}{a}", r"assuming $a > 0$; the value of $\int_0^\infty e^{-ax}\,dx$"),
+    # no warning unless it is certain: a value put in, an equation, rounded decimals, + C, a complex
+    # root with a real reading, an identity that holds on part of the line, statistics
+    ([r"2\pi r(r+h)"], r"2\pi\cdot 3(3+4)", r"42 \pi", None),
+    (["2x+3x"], "10", None, None),
+    ([r"\sqrt{2}+1"], "1.414+1", "2.414", None),
+    ([r"\frac{2}{3}"], "0.667", None, None),
+    ([r"\frac{1}{3}\cdot 3"], r"0.333\cdot 3", "0.999", None),
+    ([r"0.25\cdot 0.5 + 0.875"], "0.13+0.88", "1.01", None),
+    ([r"\int_0^1 x^2\,dx"], "0.33", None, None),
+    ([r"\int 2x\,dx"], "x^2 + 5", None, None),
+    ([r"(-8)^{1/3}"], "-2", None, None),
+    ([r"\sqrt{(x-5)^2}"], "x-5", None, None),
+    ([r"\sin(n\pi)+\sin(n\pi)+2"], "1+1", "2", None),
+    ([r"1 - P(Z \le 1)"], "0.2", None, None),
+    ([r"x + x"], r"\begin{pmatrix} 1 \\ 2 \end{pmatrix}", None, None),
+    (["A", r"\pi r^2"], r"\pi \cdot 3^2", r"9 \pi", None),
+    ([r"f(x)", "y'", r"\text{area}", "2 +"], "2 + 3", "5", None),                   # unreadable earlier sides
+]
+bad = []
+t0 = time.time()
+for chain, src, want, note in CHAINS:
+    r = mathcalc.compute(src, chain=chain)
+    if (r and r["latex"]) != want or (r and r["note"]) != note:
+        bad.append(f"{' = '.join(chain + [src])} -> {r!r} (want {want!r}, note {note!r})")
+for src, want in TABLE[:12] + [(r"\int_0^1 x^2\,dx", r"\frac{1}{3}"), ("", None)]:     # the field is additive
+    for chain in (None, [], "junk", [None, 3, "", " ", "x" * 5000], ["y"]):
+        r = mathcalc.compute(src, chain=chain)
+        if (r and r["latex"]) != want or (r and r["note"]):
+            bad.append(f"{src} with chain {str(chain)[:20]!r} -> {r!r} (want {want!r})")
+check(f"chains ({len(CHAINS)} chains; without one nothing changes)", not bad, "; ".join(bad))
+check("the chain table runs fast", time.time() - t0 < 20, f"{time.time() - t0:.1f}s")
+SLOW = r"\int_0^1 \frac{\sin(x^x) e^{x^2}}{1+x^{x}} \ln(1+\tan x)\,dx"          # seconds of SymPy, no closed form
+t1 = time.time()
+try:
+    r = [mathcalc.compute("2+2", chain=[SLOW]), mathcalc.compute("", chain=[SLOW]), mathcalc.compute("F(x)", chain=[SLOW])]
+except mathcalc.Timeout:
+    r = "timeout"
+check("a slow earlier side costs time, never the last side's result",
+      r != "timeout" and r[0] and r[0]["latex"] == "4" and r[1] is None and r[2] is None and time.time() - t1 < 11,
+      f"{time.time() - t1:.1f}s {r!r}")
+
 # 2. Worker protocol (the process server.py runs)
 w = subprocess.Popen(["/usr/bin/python3", os.path.join(TEXC, "mathcalc.py"), "--worker"], stdin=subprocess.PIPE,
                      stdout=subprocess.PIPE, text=True)
@@ -215,6 +313,15 @@ w = subprocess.run(["/usr/bin/python3", os.path.join(TEXC, "mathcalc.py"), "--wo
                    input=json.dumps({"id": 8, "latex": "P(X > 130)", "decls": [N("X", r"N(100, 15^2)")]}) + "\n")
 reply = json.loads(w.stdout.splitlines()[1]) if len(w.stdout.splitlines()) > 1 else {}
 check("worker: declarations come with the request", (reply.get("result") or {}).get("latex") == "0.02275013195", w.stdout[-300:])
+w = subprocess.run(["/usr/bin/python3", os.path.join(TEXC, "mathcalc.py"), "--worker"], capture_output=True, text=True, timeout=60,
+                   input="".join(json.dumps(q) + "\n" for q in (
+                       {"id": 9, "latex": r"\left[t^2\right]_0^x", "chain": [r"\int_0^x 2t\,dt"]},
+                       {"id": 10, "latex": "", "chain": [r"\int_0^x 2t\,dt"]},
+                       {"id": 11, "latex": r"\frac{1}{2}", "chain": [r"\int_0^1 x^2\,dx"]},
+                       {"id": 12, "latex": "2+2", "chain": "junk"})))
+reply = [json.loads(l).get("result") or {} for l in w.stdout.splitlines()[1:]]
+check("worker: a chain comes with the request", len(reply) == 4 and [x.get("latex") for x in reply] == ["x^{2}", "x^{2}", "0.5", "4"]
+      and [bool(x.get("note")) for x in reply] == [False, False, True, False], w.stdout[-400:])
 w = subprocess.run(["/usr/bin/python3", os.path.join(TEXC, "mathcalc.py"), "--worker"], input="", capture_output=True,
                    text=True, env=dict(os.environ, PYTHONNOUSERSITE="1"), timeout=30)
 hello = json.loads(w.stdout.splitlines()[0]) if w.stdout.strip() else {}
@@ -270,6 +377,20 @@ try:
     check("POST /api/calc with declarations", r.get("ok") and (r.get("result") or {}).get("latex") == "0.02275013195", json.dumps(r))
     r = api(18873, tok, "POST", "/api/calc", {"latex": "P(X > 130)", "decls": "not a list"})
     check("POST /api/calc ignores malformed declarations", r.get("ok") and r.get("result") is None, json.dumps(r))
+    r = api(18873, tok, "POST", "/api/calc", {"latex": r"\frac{1}{2}", "chain": [r"\int_0^1 x^2\,dx"]})
+    check("POST /api/calc with a chain: the result, and the warning for a wrong step",
+          r.get("ok") and (r.get("result") or {}).get("latex") == "0.5" and "doesn't match" in ((r.get("result") or {}).get("note") or ""), json.dumps(r))
+    r = api(18873, tok, "POST", "/api/calc", {"latex": "", "chain": [r"\int_0^x 2t\,dt", r"\left[t^2\right]_0^x"]})
+    check("POST /api/calc: an empty last side takes the chain's value", r.get("ok") and (r.get("result") or {}).get("latex") == "x^{2}", json.dumps(r))
+    r = [api(18873, tok, "POST", "/api/calc", {"latex": "2+2", "chain": c}) for c in ("junk", [1, None, {}], [], ["x" * 3000])]
+    try:
+        api(18873, tok, "POST", "/api/calc", {"latex": "", "chain": [" ", 7]})
+        code = 200
+    except urllib.error.HTTPError as e:
+        code = e.code
+    check("POST /api/calc ignores a malformed chain (and still wants a formula)",
+          all(x.get("ok") and (x.get("result") or {}).get("latex") == "4" and not x["result"].get("note") for x in r) and code == 400,
+          json.dumps([r, code]))
 
     # Typed for real: key events into the editor, then Tab / ⌥Tab / Escape.
     SETUP = r"""await T.app.ready; await T.app.openFile('main.tex');
@@ -307,8 +428,8 @@ return end > 0;"""
              "--eval", r"window.__d = __line('\\begin{equation}\n\\frac{1}{3}+\\frac{1}{6} \n\\end{equation}') - 1; T.editor.cm.setCursor({line: __d, ch: T.editor.cm.getLine(__d).length}); return __d;",
              "--type", "=", "--sleep", "1200", "--key", "Alt+Tab", "--sleep", "200",
              "--eval", "return __get(__d);",
-             # e: not in math, and a bare name: nothing
-             "--eval", r"window.__e = __line('2+2 '); T.editor.cm.setCursor({line: __e, ch: 4}); return __e;",
+             # e: prose that isn't plain arithmetic (a function call), and a bare name: nothing
+             "--eval", r"window.__e = __line('see f(2+3) '); T.editor.cm.setCursor({line: __e, ch: 11}); return __e;",
              "--type", "=", "--sleep", "1000",
              "--eval", "return __state();",
              "--eval", r"window.__f = __line('$y $'); T.editor.cm.setCursor({line: __f, ch: 3}); return __f;",
@@ -348,6 +469,108 @@ return end > 0;"""
              "--type", "=", "--sleep", "1200",
              "--eval", "return __state();",
              "--key", "Escape", "--sleep", "150",
+             # o: plain arithmetic written as text, outside math; Tab writes the result as text
+             "--eval", r"window.__o = __line('$p_x$ = 0.2 + 0.1 + 0.2 + 2(0.05 + 0.05) '); T.editor.cm.setCursor({line: __o, ch: T.editor.cm.getLine(__o).length}); return __o;",
+             "--type", "=", "--sleep", "1200",
+             "--eval", "return __state();",
+             "--key", "Tab", "--sleep", "200",
+             "--eval", "return __get(__o);",
+             # p: a rounded decimal in text gets $\approx$
+             "--eval", r"window.__p = __line('0.1/3 '); T.editor.cm.setCursor({line: __p, ch: 6}); return __p;",
+             "--type", "=", "--sleep", "1200", "--key", "Tab", "--sleep", "200",
+             "--eval", "return __get(__p);",
+             # q: a fraction is written 1/2; ⌥Tab takes the decimal
+             "--eval", r"window.__q = __line('1/3 + 1/6 '); T.editor.cm.setCursor({line: __q, ch: 10}); return __q;",
+             "--type", "=", "--sleep", "1200",
+             "--eval", "return __state();",
+             "--key", "Alt+Tab", "--sleep", "200",
+             "--eval", "return __get(__q);",
+             # r: text arithmetic in a comment stays quiet
+             "--eval", r"window.__r = __line('% 2+3 '); T.editor.cm.setCursor({line: __r, ch: 6}); return __r;",
+             "--type", "=", "--sleep", "1000",
+             "--eval", "return __state();",
+             # s: a chain on one line, A = B = : B's value (an antiderivative between bounds)
+             "--eval", r"window.__s = __line('$\\int_0^x 2t\\,dt = \\left[t^2\\right]_0^x $'); T.editor.cm.setCursor({line: __s, ch: T.editor.cm.getLine(__s).length - 1}); return __s;",
+             "--type", "=", "--sleep", "1500",
+             "--eval", "return __state();",
+             "--key", "Tab", "--sleep", "200",
+             "--eval", "return __get(__s);",
+             # t: align, the chain goes on in the next line with a bare "&="
+             "--eval", r"window.__t = __line('\\begin{align}\n\\int_0^x 2t\\,dt &= \\left[t^2\\right]_0^x \\\\\n&\n\\end{align}') - 1; T.editor.cm.setCursor({line: __t, ch: T.editor.cm.getLine(__t).length}); return T.editor.cm.getLine(__t);",
+             "--type", "=", "--sleep", "1500",
+             "--eval", "return __state();",
+             "--key", "Tab", "--sleep", "200",
+             "--eval", "return __get(__t);",
+             # u: a step that doesn't equal the first expression gets a warning under its result
+             "--eval", r"window.__u = __line('$\\int_0^1 x^2\\,dx = \\frac{1}{2} $'); T.editor.cm.setCursor({line: __u, ch: T.editor.cm.getLine(__u).length - 1}); return __u;",
+             "--type", "=", "--sleep", "1500",
+             "--eval", "return __state();",
+             "--shot", os.path.join(BASE, "calc-chain.png"),
+             "--key", "Escape", "--sleep", "150",
+             # v: a chain written as text: the result, quietly when the step is right
+             "--eval", r"window.__v = __line('$p_x$ = 0.2 + 0.1 + 0.2 + 2(0.05 + 0.05) = 0.5 + 0.2 '); T.editor.cm.setCursor({line: __v, ch: T.editor.cm.getLine(__v).length}); return __v;",
+             "--type", "=", "--sleep", "1200",
+             "--eval", "return __state();",
+             "--key", "Escape", "--sleep", "150",
+             # w: ...and with the warning when it isn't; Tab still writes the step's own value
+             "--eval", r"window.__w = __line('$p_x$ = 0.2 + 0.1 + 0.2 + 2(0.05 + 0.05) = 0.5 + 0.1 '); T.editor.cm.setCursor({line: __w, ch: T.editor.cm.getLine(__w).length}); return __w;",
+             "--type", "=", "--sleep", "1200",
+             "--eval", "return __state();",
+             "--key", "Tab", "--sleep", "200",
+             "--eval", "return __get(__w);",
+             # x: a chain that already ends in the answer, and a definition y = …: nothing
+             "--eval", r"window.__x = __line('$\\frac{d}{dx}(x^3+2x) = 3x^2 + 2 $'); T.editor.cm.setCursor({line: __x, ch: T.editor.cm.getLine(__x).length - 1}); return __x;",
+             "--type", "=", "--sleep", "1200",
+             "--eval", "return __state();",
+             "--eval", r"window.__y = __line('$y = 3x + 2 $'); T.editor.cm.setCursor({line: __y, ch: T.editor.cm.getLine(__y).length - 1}); return __y;",
+             "--type", "=", "--sleep", "1200",
+             "--eval", "return __state();",
+             # z: how formulas and text lines split into the last side and the chain before it
+             "--eval", r"""const P = T.editor.calcParts, X = T.editor.textChain;
+return {one: P('\\int_0^x 2t\\,dt = \\left[t^2\\right]_0^x '),
+  align: P('\\int_0^x 2t\\,dt &= \\left[t^2\\right]_0^x \\\\\n&'),
+  three: P('\\int_0^x 2t\\,dt &= \\left[t^2\\right]_0^x \\nonumber \\\\[2pt]\n &= x^2 - 0 \\label{eq:a} \\\\\n&'),
+  name: P('p_x = 0.2+0.1 = 0.3 + 0 '), comma: P('a, b '), le: P('x \\le 3 + 4 '), sum: P('\\sum_{k=1}^{n} k '),
+  amp: P('\\int_0^1 2x\\,dx &'), next: P('x &= 1 + 1 \\\\\ny + 2 &'), ne: P('5 != 3 + 4 '), def: P('x := 3 + 4 '),
+  quad: P('2 + 3 = 5, \\quad 4 + 4 '), event: P('P(X = 3) + P(X = 4) '), cols: P('x &= 1 + 2 & y &= 2 + 3 '),
+  text: X('$p_x$ = 0.2 + 0.1 = 0.5 - 0.2 '), sentence: X('3 + 4 = 7. Then 7/2 '), cells: X('3 + 4 = 7 & 5 + 6 '),
+  words: X('so 3 + 4 = 7 = 14/2 '), neq: X('5 != 3 + 4 ')};""",
+             # aa: "=" typed right after inline math has closed: the formula's value, in its own $…$
+             "--eval", r"window.__aa = __line('$f_x = \\int_0^x 2 dy$ '); T.editor.cm.setCursor({line: __aa, ch: T.editor.cm.getLine(__aa).length}); return __aa;",
+             "--type", "=", "--sleep", "1200",
+             "--eval", "return __state();",
+             "--key", "Tab", "--sleep", "200",
+             "--eval", "return __get(__aa);",
+             # ab: a plain number goes in as text; ac: a rounded one with $\approx$; ad: a bare name: nothing
+             "--eval", r"window.__ab = __line('$\\int_0^1 2x\\,dx$ '); T.editor.cm.setCursor({line: __ab, ch: T.editor.cm.getLine(__ab).length}); return __ab;",
+             "--type", "=", "--sleep", "1200", "--key", "Tab", "--sleep", "200",
+             "--eval", "return __get(__ab);",
+             "--eval", r"window.__ac = __line('$\\sqrt{2}$ '); T.editor.cm.setCursor({line: __ac, ch: T.editor.cm.getLine(__ac).length}); return __ac;",
+             "--type", "=", "--sleep", "1200", "--key", "Tab", "--sleep", "200",
+             "--eval", "return __get(__ac);",
+             "--eval", r"window.__ad = __line('$f_x$ '); T.editor.cm.setCursor({line: __ad, ch: T.editor.cm.getLine(__ad).length}); return __ad;",
+             "--type", "=", "--sleep", "1000",
+             "--eval", "return __state();",
+             # ae: a decimal result in text: ⌥Tab writes its fraction
+             "--eval", r"window.__ae = __line('1.5 + 2.25 '); T.editor.cm.setCursor({line: __ae, ch: T.editor.cm.getLine(__ae).length}); return __ae;",
+             "--type", "=", "--sleep", "1200", "--key", "Alt+Tab", "--sleep", "200",
+             "--eval", "return __get(__ae);",
+             # af: two results: ↓ chooses the other one (the ghost follows), Enter inserts it
+             "--eval", r"window.__af = __line('1.5 + 2.25 '); T.editor.cm.setCursor({line: __af, ch: T.editor.cm.getLine(__af).length}); return __af;",
+             "--type", "=", "--sleep", "1200",
+             "--eval", "return {st: __state(), rows: document.querySelectorAll('.texc-calc-opt').length, picked: [...document.querySelectorAll('.texc-calc-opt')].map(e => e.classList.contains('is-selected'))};",
+             "--key", "ArrowDown", "--sleep", "150",
+             "--eval", "return {st: __state(), ghostText: (document.querySelector('.texc-calc-ghost') || {}).textContent, line: __get(__af), cur: T.editor.cm.getCursor().line === __af, picked: [...document.querySelectorAll('.texc-calc-opt')].map(e => e.classList.contains('is-selected'))};",
+             "--key", "Enter", "--sleep", "200",
+             "--eval", "return {line: __get(__af), next: __get(__af + 1)};",
+             # ag: ↓ then ↑ comes back to the first; Tab inserts it
+             "--eval", r"window.__ag = __line('$\\frac{1}{3}+\\frac{1}{6} $'); T.editor.cm.setCursor({line: __ag, ch: T.editor.cm.getLine(__ag).length - 1}); return __ag;",
+             "--type", "=", "--sleep", "1200", "--key", "ArrowDown", "--sleep", "100", "--key", "ArrowUp", "--sleep", "100", "--key", "Tab", "--sleep", "200",
+             "--eval", "return __get(__ag);",
+             # ah: one result only: Enter is still a new line, nothing is inserted
+             "--eval", r"window.__ah = __line('$2^{10} $'); T.editor.cm.setCursor({line: __ah, ch: T.editor.cm.getLine(__ah).length - 1}); return __ah;",
+             "--type", "=", "--sleep", "1200", "--key", "ArrowDown", "--sleep", "150",
+             "--eval", "return {st: __state(), line: __get(__ah)};",
              # i: Settings has the switch, and turning it off stops the suggestions
              "--eval", r"""T.app.openSettings(); await new Promise(r => setTimeout(r, 800));
 const sw = document.querySelector('#set-calc'); const hint = sw && sw.closest('.app-set-row').innerText;
@@ -359,7 +582,7 @@ return {exists: !!sw, hint, setting: T.state.settings.mathResults};""",
              "--eval", r"""const st = __state(); await T.api.put('/api/settings', {mathResults: null}); return st;""",
              ]
     out = subprocess.run(["node", os.path.join(TOOLS, "cdp.mjs"), f"http://127.0.0.1:18873/", "--wait", "3000", *steps],
-                         capture_output=True, text=True, timeout=180).stdout
+                         capture_output=True, text=True, timeout=300).stdout
     o = json.loads(out)
     ev = [e.get("value", e) for e in o["evals"]]
     ok_setup = ev[0] is True
@@ -375,7 +598,7 @@ return {exists: !!sw, hint, setting: T.state.settings.mathResults};""",
     check("Escape dismisses without changing the text", ev[7]["line"] == r"\[ 2+2 =\]" and not ev[7]["st"]["ghost"], json.dumps(ev[7]))
     check("a rounded decimal is inserted with \\approx", ev[9] == r"$\sqrt{2} \approx 1.414213562$", json.dumps(ev[9]))
     check("⌥Tab inserts the decimal alternative (equation env)", ev[11] == r"\frac{1}{3}+\frac{1}{6} = 0.5", json.dumps(ev[11]))
-    check("no suggestion outside math", not ev[13]["ghost"] and not ev[13]["s"], json.dumps(ev[13]))
+    check("no suggestion for prose like f(2+3)", not ev[13]["ghost"] and not ev[13]["s"], json.dumps(ev[13]))
     check("no suggestion for a bare name", not ev[15]["ghost"] and not ev[15]["s"], json.dumps(ev[15]))
     g = ev[17]
     check("typing on dismisses it and keeps what was typed", g["line"] == r"$3 \cdot 4 = 1$" and not g["st"]["ghost"]
@@ -389,10 +612,70 @@ return {exists: !!sw, hint, setting: T.state.settings.mathResults};""",
     check("a \\pm b gives the interval", (ev[26].get("s") or {}).get("latex") == "(50.04, 53.96)", json.dumps(ev[26]))
     check("a commented-out declaration doesn't count", not ev[28]["s"] and not ev[28]["ghost"], json.dumps(ev[28]))
     check("a \\text{Bin}(10, 0.3) declaration", (ev[30].get("s") or {}).get("latex") == "0.266827932", json.dumps(ev[30]))
-    i = ev[31]
+    tx = ev[32]
+    check("plain arithmetic in text (outside math) shows the result as text",
+          (tx.get("s") or {}).get("text") == "0.7" and tx.get("ghost") and tx.get("card"), json.dumps(tx))
+    check("Tab writes it as text", ev[33] == "$p_x$ = 0.2 + 0.1 + 0.2 + 2(0.05 + 0.05) = 0.7", json.dumps(ev[33]))
+    check("a rounded decimal in text gets $\\approx$", ev[35] == r"0.1/3 $\approx$ 0.03333333333", json.dumps(ev[35]))
+    q = ev[37]
+    check("a fraction in text is written 1/2", (q.get("s") or {}).get("text") == "1/2", json.dumps(q))
+    check("⌥Tab in text takes the decimal", ev[38] == "1/3 + 1/6 = 0.5", json.dumps(ev[38]))
+    check("text arithmetic in a comment stays quiet", not ev[40]["ghost"] and not ev[40]["s"], json.dumps(ev[40]))
+    c = ev[42]
+    check("a chain on one line: the last = gives the antiderivative between its bounds",
+          (c.get("s") or {}).get("latex") == "x^{2}" and c.get("ghost") and not c.get("note"), json.dumps(c))
+    check("Tab inserts it after the chain", ev[43] == r"$\int_0^x 2t\,dt = \left[t^2\right]_0^x = x^{2}$", json.dumps(ev[43]))
+    c = ev[45]
+    check("align: a bare &= on the next line continues the chain", ev[44] == "&" and (c.get("s") or {}).get("latex") == "x^{2}"
+          and c.get("ghost") and not c.get("note"), json.dumps([ev[44], c]))
+    check("Tab inserts it after the &=", ev[46] == "&=x^{2}", json.dumps(ev[46]))
+    c = ev[48]
+    check("a step that doesn't match the first expression: its value, with a warning",
+          (c.get("s") or {}).get("latex") == "0.5" and "doesn't match" in (c.get("note") or "") and "which is" in (c.get("note") or "")
+          and c.get("noteMath"), json.dumps(c))
+    c = ev[50]
+    check("a chain written as text: the result, no warning", (c.get("s") or {}).get("text") == "0.7" and c.get("ghost")
+          and not c.get("note"), json.dumps(c))
+    c = ev[52]
+    check("a wrong step in a text chain: its value, with a warning", (c.get("s") or {}).get("text") == "0.6"
+          and "doesn't match" in (c.get("note") or "") and c.get("noteMath"), json.dumps(c))
+    check("Tab writes the step's own value", ev[53] == "$p_x$ = 0.2 + 0.1 + 0.2 + 2(0.05 + 0.05) = 0.5 + 0.1 = 0.6", json.dumps(ev[53]))
+    check("a chain that already ends in the answer stays quiet", not ev[55]["ghost"] and not ev[55]["s"], json.dumps(ev[55]))
+    check("a definition y = 3x + 2 stays quiet", not ev[57]["ghost"] and not ev[57]["s"], json.dumps(ev[57]))
+    z = ev[58] if isinstance(ev[58], dict) else {}
+    INT, BRK = r"\int_0^x 2t\,dt", r"\left[t^2\right]_0^x"
+    want = {"one": {"latex": BRK, "chain": [INT]}, "align": {"latex": BRK, "chain": [INT]},
+            "three": {"latex": "x^2 - 0", "chain": [INT, BRK]}, "name": {"latex": "0.3 + 0", "chain": ["0.2+0.1"]},
+            "comma": {"latex": "b", "chain": []}, "le": {"latex": "3 + 4", "chain": []},
+            "sum": {"latex": r"\sum_{k=1}^{n} k", "chain": []}, "amp": {"latex": r"\int_0^1 2x\,dx", "chain": []},
+            "next": {"latex": "y + 2", "chain": []}, "ne": {"latex": "3 + 4", "chain": []}, "def": {"latex": "3 + 4", "chain": []},
+            "quad": {"latex": "4 + 4", "chain": []}, "event": {"latex": "P(X = 3) + P(X = 4)", "chain": []},
+            "cols": {"latex": "2 + 3", "chain": []},
+            "text": ["0.2+0.1"], "sentence": [], "cells": [], "words": ["3+4"], "neq": []}
+    diff = {k: z.get(k) for k in want if z.get(k) != want[k]}
+    check(f"what a chain is: = and &= and a continued \\\\ carry on, anything else starts over ({len(want)} splits)", not diff, json.dumps(diff))
+    aa = ev[60]
+    check("= after closed inline math ($… $ =) offers the formula's value", (aa.get("s") or {}).get("latex") == "2 x"
+          and (aa.get("s") or {}).get("text") == "$2 x$" and aa.get("ghost"), json.dumps(aa))
+    check("Tab writes it in its own $…$", ev[61] == r"$f_x = \int_0^x 2 dy$ = $2 x$", json.dumps(ev[61]))
+    check("a plain number after closed math goes in as text", ev[63] == r"$\int_0^1 2x\,dx$ = 1", json.dumps(ev[63]))
+    check("a rounded one after closed math gets $\\approx$", ev[65] == r"$\sqrt{2}$ $\approx$ 1.414213562", json.dumps(ev[65]))
+    check("a bare name in closed math stays quiet", not ev[67]["ghost"] and not ev[67]["s"], json.dumps(ev[67]))
+    check("⌥Tab on a decimal result in text writes its fraction", ev[69] == "1.5 + 2.25 = 15/4", json.dumps(ev[69]))
+    af = ev[71]
+    check("two results show as two rows, the first selected", af.get("rows") == 2 and af.get("picked") == [True, False]
+          and (af["st"].get("s") or {}).get("sel") == 0, json.dumps(af))
+    af = ev[72]
+    check("↓ selects the other result and the ghost follows", af.get("picked") == [False, True] and af.get("ghostText") == " 15/4"
+          and af.get("cur") and af.get("line") == "1.5 + 2.25 =", json.dumps(af))
+    check("Enter inserts the chosen one, without a new line", ev[73].get("line") == "1.5 + 2.25 = 15/4" and ev[73].get("next") == r"\end{document}", json.dumps(ev[73]))
+    check("↓ then ↑ returns to the first; Tab inserts it", ev[75] == r"$\frac{1}{3}+\frac{1}{6} = \frac{1}{2}$", json.dumps(ev[75]))
+    ah = ev[77]
+    check("with one result ↓ is an ordinary arrow key", not ah["st"]["ghost"] and ah.get("line") == "$2^{10} =$", json.dumps(ah))
+    i = ev[-2]
     check("Settings has the 'Results after =' switch", isinstance(i, dict) and i.get("exists") and "Results after =" in (i.get("hint") or "")
           and i.get("setting") is False, json.dumps(i))
-    check("switched off: no suggestion", not ev[32]["ghost"] and not ev[32]["s"], json.dumps(ev[32]))
+    check("switched off: no suggestion", not ev[-1]["ghost"] and not ev[-1]["s"], json.dumps(ev[-1]))
     check("no page errors", not o["exceptions"] and not [c for c in o["console"] if c.startswith("error")],
           json.dumps(o["exceptions"] + o["console"])[:300])
 finally:
