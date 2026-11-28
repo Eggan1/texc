@@ -70,7 +70,7 @@ Every `/api` route needs the session token, sent as the `X-Texc-Token` header or
 | `POST /api/ai`, `/api/ai/cancel` | project | AI request streamed as SSE: `status`, `delta`, `notice`, `done`, `error` |
 | `GET /api/arxiv`, `POST /api/cite` | project | Literature search and BibTeX entries |
 | `POST /api/wordcount`, `/api/open-pdf`, `/api/clean` | project | Tools |
-| `GET /api/calc`, `POST /api/calc` | project | "=" results: status (starts the SymPy worker), or `{latex, decls?}` → `{ok, result: {latex, approx, alt, note} \| null}` |
+| `GET /api/calc`, `POST /api/calc` | project | "=" results: status (starts the SymPy worker), or `{latex, decls?, chain?}` → `{ok, result: {latex, approx, alt, note} \| null}` |
 | `GET /api/lobby`, `POST /api/lobby/new` | lobby | Welcome data (recent, templates, defaults, tools, background); create a project |
 | `GET/POST /api/lobby/background` | lobby | Welcome background image: `{data: base64}`, `{opacity}`, `{clear: true}` |
 | `GET /api/recent`, `POST /api/recent/forget` | both | Recent folders |
@@ -94,22 +94,58 @@ Every `/api` route needs the session token, sent as the `X-Texc-Token` header or
   environment) sends the left-hand side to `POST /api/calc`. That is the text after the last top-level relation, `&`,
   `\\`, comma or `\text{}` (brackets `( [ {` nest, and `\pm` doesn't split). It fires only when the rest of the line is
   the end of the formula.
+- **Chains (`calcParts`).** `A = B = C =` sends `latex: C` and `chain: [A, B]`, the earlier sides oldest first.
+  - A chain runs through `=`, an `&` next to one (`&=`) and a `\\` that the next `=` continues (`… \\ &=`, or the
+    `\\ &` the typed `=` follows), so an `align` continuation sends what the one-line form sends. `\nonumber`,
+    `\notag`, `\label{}` and `\tag{}` are blanked first.
+  - Anything else ends it: another relation (`!=`, `<=`, `:=`, `==` included), `,` `;` `\quad` `\text{}`, a lone `&`,
+    a `\\` that starts a new formula.
+  - Sides that are only a name or a number are dropped, and at most 8 are sent. Without a chain the old rule holds:
+    no request for an empty side, a name or a number. With one, an empty side or a number is sent.
+  - In text, `textChain` takes the earlier sides only when everything between the `=` signs is arithmetic, so
+    `3 + 4 = 7. Then 7/2 =` has no chain.
+  - The server keeps the last 8 strings of at most 2000 characters and ignores anything else in `chain`; `latex`
+    may be empty only when a chain is left.
+- **Chain results (`mathcalc.compute`).** The last side is computed first, exactly as without a chain. Then the
+  first of up to 4 earlier sides with a result of its own stands for the chain (names and final forms have none).
+  - Last side empty: that side's result. Unreadable (a parse error or a refusal): the same, with the note
+    `the value of $…$`.
+  - Last side surely different: its own result with the note `⚠ doesn't match $…$, which is $…$`; when it has no
+    result (a final form), the earlier side's result with a `⚠` note.
+  - "Surely different" (`_surely_different`) is deliberately narrow. It needs the same free symbols on both sides,
+    no `+ C`, statistics, matrix, `\pm` or unevaluated value, and exact inequality or a relative difference above
+    1e-9 between real numbers. With symbols (at most 3) the two must differ at all 5 fixed sample points, three
+    non-integer and two integer. If the last side has decimals, it compares only when the earlier side is decimal
+    arithmetic whose every intermediate value fits the last side's decimal places; otherwise they may be rounded.
+  - The chain part runs under its own deadline: what is left of the request's 4 s less 0.3 s, and at most 2 s once
+    the last side has a result. A timeout or error there returns the last side's result, never a failed request.
+- **Text arithmetic.** Outside math (not in a comment or the preamble), `=` after plain arithmetic
+  (`0.2 + 0.1 + 2(0.05 + 0.05) =`) sends it too. The editor accepts only numbers, `+ - * / ^ × ÷ ·` and brackets,
+  set apart from the word before them, with at least one operation. It rewrites them as LaTeX (`2^10` → `2^{10}`,
+  `*` → `\cdot`), and inserts the answer as text: `0.7`, `1/2`, or `$…$` for a power of ten. A rounded one gets
+  `$\approx$`. Anything else (a root, a complex number) falls back to its decimal or shows nothing.
 - **Declarations.** The request also carries `decls`: for each `\sim` before the `=` (not in a comment, at most 40),
   the text just before it and the text after it, oldest first. `mathcalc.py` parses them with its own tokenizer:
   the name is the longest suffix that parses as one symbol, and the distribution comes from a fixed table. The
   server caps the list at 40 and each part at 120/300 characters.
-- **Display.** The answer is a bookmark widget (ghost text) plus a KaTeX preview card. Nothing enters the document
-  until **Tab** (exact) or **⌥Tab** (decimal) inserts it as one undo step. A rounded decimal replaces the `=` with
+- **Display.** The answer is a bookmark widget (ghost text) plus a KaTeX preview card; a note under it renders
+  its `$…$` parts with KaTeX (in text mode only a chain's note is shown). Nothing enters the document
+  until it is inserted as one undo step: **Tab** takes the selected row, **↑ ↓** move between the two rows when there are two (then **Enter** inserts as well), and **⌥Tab** takes the second directly. A rounded decimal replaces the `=` with
   `\approx`. Any edit, cursor move, blur or **Esc** dismisses it.
 - **Worker (`server.py` `MathEngine`).** `mathcalc.py --worker` is started on first use with the first of
   `$TEXC_MATH_PYTHON`, the server's Python and `/usr/bin/python3` that has SymPy.
-  - It speaks JSON lines: `{"id","latex","decls"?}` in, `{"id","ok","result"}` out.
+  - It speaks JSON lines: `{"id","latex","decls"?,"chain"?}` in, `{"id","ok","result"}` out.
   - One request at a time. The worker stops itself after about 4 s, and the server kills and restarts it after 6 s.
   - It stops after 20 minutes idle, and exits when its stdin closes.
 - **Without SymPy** the feature is off. Settings shows the install command.
 - **Parsing (`mathcalc.py`).** A recursive-descent parser over TeX tokens builds SymPy objects directly.
   - It reads arithmetic, `\frac`, `\sqrt`, functions, `|x|`, `\binom`, `!`, `\%` and `^\circ`.
   - Calculus: `\int` (the differential `dx` ends the integrand), `\frac{d}{dx}`, `\partial`, `\lim`, `\sum` and `\prod`.
+  - Evaluation between bounds: `[F]_a^b` (in `primary`; a `^` counts only with a `_` after its script, so
+    `[x+1]^2` stays a power) and `F \Big|_a^b` (in `expr`, on everything before the bar, and after an earlier bar on its own term; `starts_factor` doesn't
+    open an absolute value at a `|` followed by a script, outside `|…|` and `P(…)`). The tokenizer has already
+    dropped `\left`, `\right`, `\big…` and the invisible `.`. A one-token script takes no subscript of its own,
+    so `\int^x_0` and `]^y_2` read as two scripts.
   - Matrices: the matrix environments, with `^{-1}`, `^T` and `\det`. Tuples `(1, 2)` are vectors; `\cdot` and
     `\times` of two vectors are the dot and cross products; `\|v\|` is a norm.
   - Statistics: `P(event)`, `E[…]`, `Var`, `SD`, `Cov` and `Corr` read declared variables (and `Z`). The `Dist`
@@ -173,5 +209,6 @@ Run it through the tools in `app/test/`:
 - `winprobe PID` checks that no window is visible. Build it with `swiftc -O app/test/winprobe.swift -o app/test/winprobe`.
 - `node cdp.mjs URL --eval '…' --shot out.png` drives headless Chrome for browser-mode checks.
 - `python3 app/test/final_check.py` is the end-to-end acceptance check.
-- `python3 app/test/calc_check.py` checks the "=" results: a table of formulas with textbook answers, the worker,
-  the API, typing in headless Chrome, and the no-SymPy case.
+- `python3 app/test/calc_check.py` checks the "=" results: a table of formulas with textbook answers, a table of
+  chains (results, warnings, and the cases that must not warn), the worker, the API, typing in headless Chrome,
+  and the no-SymPy case.

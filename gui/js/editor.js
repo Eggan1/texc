@@ -1694,7 +1694,7 @@
     "cong", "propto", "implies", "iff", "Rightarrow", "Leftrightarrow", "Longrightarrow", "longrightarrow",
     "Leftarrow", "mapsto", "quad", "qquad", "colon", "coloneqq", "in", "notin", "subset", "subseteq",
     "supset", "land", "lor", "wedge", "vee", "leqslant", "geqslant", "ll", "gg", "text",
-    "nonumber", "notag"]); // not \pm: "52 \pm 1.96 =" asks for the interval
+    "not"]); // not \pm: "52 \pm 1.96 =" asks for the interval
   // after the "=", only the end of the formula may follow on the line
   const CALC_AFTER = /^\s*(?:$|\$|\\\]|\\\)|\\\\|&|%|\\end\b|\\label\b|\\tag\b|\\nonumber\b|\\notag\b|[.,;]\s*(?:$|\$|\\\]|\\\)))/;
   let calc = null; // { entry, pos, bm, card, r, spaced }
@@ -1780,11 +1780,27 @@
     return inMath() ? base + stack[stack.length - 1].start : -1;
   }
 
-  // The left-hand side: the formula after the last top-level relation, &, \\, comma or \text{}.
-  function calcLhs(src) {
+  // What the "=" asks about: { latex, chain }. latex is the formula after the last top-level "=",
+  // relation, comma or \text{}; chain holds the sides before it when it ends a chain of equalities
+  // (A = B = C: C with [A, B]), oldest first, so mathcalc can fall back on them and check the step.
+  // A chain runs on through "=", an "&" next to one ("&=") and a "\\" that the next "=" continues
+  // ("… \\ &="); anything else ends it: another relation, "," ";" \text{} \quad, a lone "&", and a
+  // "\\" that starts a new formula. Sides that are only a name or a number are left out.
+  const CALC_BLANK = /\\(?:nonumber|notag)(?![A-Za-z])|\\(?:label|tag)\*?\s*\{[^{}]*\}/g;
+  const CALC_NAME = /^(?:[A-Za-z]|\\[A-Za-z]+)(?:_\{?\w+\}?)?$/, CALC_NUMBER = /^\d+(?:\.\d+)?$/;
+  function calcParts(src) {
+    src = src.replace(CALC_BLANK, (m) => " ".repeat(m.length));
     src = src.replace(/&\s*$/, ""); // align: "\int_0^1 x\,dx &=" means the part before the &
-    let depth = 0, cut = 0;
+    const marks = []; // top level only: { t: "=", "&", "\\" or "!" (the chain ends here), a, b }
+    let depth = 0;
     const n = src.length;
+    const group = (k) => { // past the {…} that starts at or after k
+      let d = 0;
+      while (k < n && /\s/.test(src[k])) k++;
+      if (src[k] !== "{") return k;
+      for (; k < n; k++) { if (src[k] === "{") d++; else if (src[k] === "}" && --d === 0) break; }
+      return Math.min(n, k + 1);
+    };
     for (let i = 0; i < n; i++) {
       const c = src[i];
       if (c === "%") { const j = src.indexOf("\n", i); if (j < 0) break; i = j; continue; }
@@ -1794,19 +1810,12 @@
         let end = i + m[0].length;
         if (name === "begin" || name === "left") depth++;
         else if ((name === "end" || name === "right") && depth > 0) depth--;
-        else if (name === "\\" && depth === 0) cut = end;
-        else if (depth === 0 && CALC_SEP_CMDS.has(name)) {
-          if (CALC_TEXT.has(name) || name === "text") { // skip its {…}
-            let k = end, d = 0;
-            while (k < n && /\s/.test(src[k])) k++;
-            if (src[k] === "{") { for (; k < n; k++) { if (src[k] === "{") d++; else if (src[k] === "}" && --d === 0) break; } end = Math.min(n, k + 1); }
-          }
-          cut = end;
-        } else if (depth === 0 && CALC_TEXT.has(name)) {
-          let k = end, d = 0;
-          while (k < n && /\s/.test(src[k])) k++;
-          if (src[k] === "{") { for (; k < n; k++) { if (src[k] === "{") d++; else if (src[k] === "}" && --d === 0) break; } end = Math.min(n, k + 1); }
-          cut = end;
+        else if (name === "\\" && depth === 0) {
+          end += /^\*?(?:\[\s*-?[\d.]+\s*[A-Za-z]{2}\s*\])?/.exec(src.slice(end, end + 24))[0].length; // \\[2pt]
+          marks.push({ t: "\\", a: i, b: end });
+        } else if (depth === 0 && (CALC_SEP_CMDS.has(name) || CALC_TEXT.has(name))) {
+          if (CALC_TEXT.has(name)) end = group(end);
+          marks.push({ t: "!", a: i, b: end });
         }
         if (name === "begin" || name === "end") { const em = /^\s*\{[^{}]*\}/.exec(src.slice(end, end + 80)); if (em) end += em[0].length; }
         i = end - 1;
@@ -1814,9 +1823,31 @@
       }
       if (c === "{" || c === "(" || c === "[") depth++; // P[X > 1], \mathbb{E}[X \mid …] stay whole
       else if ((c === "}" || c === ")" || c === "]") && depth > 0) depth--;
-      else if (depth === 0 && "=&<>,;".includes(c)) cut = i + 1;
+      else if (depth !== 0) continue;
+      else if (c === "=") marks.push({ t: /(?:[!<>:=]|\\not)\s*$/.test(src.slice(Math.max(0, i - 12), i)) ? "!" : "=", a: i, b: i + 1 }); // not !=, <=, :=, ==
+      else if (c === "&") marks.push({ t: "&", a: i, b: i + 1 });
+      else if ("<>,;".includes(c)) marks.push({ t: "!", a: i, b: i + 1 });
     }
-    return src.slice(cut).trim();
+    const blank = (from, to) => /^\s*$/.test(src.slice(from, to));
+    const eqAfter = (k) => { const m = marks[k + 1]; return !!m && m.t === "=" && blank(marks[k].b, m.a); };
+    const eqBefore = (k) => { const m = marks[k - 1]; return !!m && m.t === "=" && blank(m.b, marks[k].a); };
+    let cut = 0, from = 0, side = "";
+    const sides = [];
+    marks.forEach((m, k) => {
+      let soft = m.t === "=";
+      if (m.t === "&") soft = eqAfter(k) || eqBefore(k);
+      else if (m.t === "\\") { // … \\ &=   … \\ =   and the "\\" (or "\\ &") the typed "=" comes right after
+        const nx = marks[k + 1];
+        soft = nx ? eqAfter(k) || (nx.t === "&" && blank(m.b, nx.a) && eqAfter(k + 1)) : blank(m.b, n);
+      }
+      if (!soft) { cut = from = m.b; side = ""; sides.length = 0; return; }
+      side += src.slice(from, m.a) + " ";
+      from = m.b;
+      if (m.t === "=") { sides.push(side.trim()); side = ""; }
+    });
+    const latex = (side + src.slice(from)).trim();
+    const chain = sides.filter((x) => x && x.length <= 2000 && !CALC_NAME.test(x) && !CALC_NUMBER.test(x)).slice(0, 8);
+    return { latex, chain };
   }
 
   function onChangesForCalc(cmi, changes) {
@@ -1832,15 +1863,138 @@
     if (line[cur.ch - 1] !== "=") return;
     const prev = line[cur.ch - 2] || "";
     if (/[=<>!:\\]/.test(prev)) return; // ==, <=, :=, \= …
-    if (!CALC_AFTER.test(line.slice(cur.ch))) return;
     const doc = current.doc;
     const eq = Pos(cur.line, cur.ch - 1);
     const start = mathStart(doc, eq);
-    if (start < 0) return;
-    const lhs = calcLhs(doc.getRange(doc.posFromIndex(start), eq));
-    // a bare name or number (x =, y_1 =, 2 =) has nothing to compute
-    if (!lhs || lhs.length > 3000 || /^(?:[A-Za-z]|\\[A-Za-z]+)(?:_\{?\w+\}?)?$|^\d+(?:\.\d+)?$/.test(lhs)) return;
-    requestCalc(current, Pos(cur.line, cur.ch), lhs, /\s/.test(prev), calcDecls(doc, doc.indexFromPos(eq)));
+    if (start < 0) {
+      // outside math: plain arithmetic written as text, "$p_x$ = 0.2 + 0.1 + 2(0.05 + 0.05) ="
+      if (!CALC_AFTER_TEXT.test(line.slice(cur.ch)) || inPreamble(doc, cur.line)) return;
+      const before = line.slice(0, cur.ch - 1);
+      // right after inline math, "$f_x = \int_0^x 2\,dy$ =": that formula's value, in its own $…$
+      const shut = /(\$\$|\$|\\\))\s*$/.exec(before);
+      if (shut && before[shut.index - 1] !== "\\") {
+        const close = Pos(cur.line, shut.index);
+        const ms = mathStart(doc, close);
+        if (ms >= 0) {
+          const parts = calcParts(doc.getRange(doc.posFromIndex(ms), close));
+          if (parts.latex.length <= 3000 && !CALC_NAME.test(parts.latex) && (parts.chain.length || (parts.latex && !CALC_NUMBER.test(parts.latex)))) {
+            requestCalc(current, Pos(cur.line, cur.ch), parts.latex, /\s/.test(prev), calcDecls(doc, doc.indexFromPos(close)), "wrap", parts.chain);
+            return;
+          }
+        }
+      }
+      const t = textArith(before);
+      if (t) requestCalc(current, Pos(cur.line, cur.ch), t, /\s/.test(prev), null, true, textChain(before));
+      return;
+    }
+    if (!CALC_AFTER.test(line.slice(cur.ch))) return;
+    const { latex: lhs, chain } = calcParts(doc.getRange(doc.posFromIndex(start), eq));
+    // a bare name or number (x =, y_1 =, 2 =) has nothing to compute; after a chain (2 + 3 = 6 =)
+    // a number can still be checked against it, and an empty side ("… = \\ =") takes its value
+    if (lhs.length > 3000 || CALC_NAME.test(lhs) || (!chain.length && (!lhs || CALC_NUMBER.test(lhs)))) return;
+    requestCalc(current, Pos(cur.line, cur.ch), lhs, /\s/.test(prev), calcDecls(doc, doc.indexFromPos(eq)), false, chain);
+  }
+
+  // Plain arithmetic typed as text, outside math: the numbers, + - * / ^ × ÷ · and brackets just
+  // before the "=", set apart from the words before them (x2+3 and f(2+3) stay quiet), with at least
+  // one operation. Returned as LaTeX mathcalc reads (2^10 → 2^{10}, * → \cdot), or null.
+  const TEXT_ARITH = /(?:^|[\s=:${}~\]&])((?:[-+−(]\s*)*(?:\d|\.\d)[\d.\s+\-*/^()×÷·−]*)$/;
+  const TEXT_OPS = { "*": "\\cdot ", "·": "\\cdot ", "×": "\\times ", "÷": "\\div ", "−": "-", "**": "^" };
+  // after the "=": the end of the line, a cell or line break, or a closing comment/period
+  const CALC_AFTER_TEXT = /^\s*(?:$|%|&|\\\\|\\(?:end|par|newline|hfill)\b|[.,;:]\s*(?:$|%))/;
+  const isNum = (t) => /^[\d.]/.test(t || "");
+  // whole: `before` must be arithmetic from its first character on, and a lone number will do
+  function textArith(before, whole) {
+    before = whole ? before.trim() : before.slice(-400);
+    if (/(?:^|[^\\])%/.test(before)) return null; // in a comment
+    const m = TEXT_ARITH.exec(before);
+    if (!m || (whole && m[1] !== before)) return null;
+    const s = m[1].trimEnd();
+    const toks = [];
+    const re = /\s*(\d+(?:\.\d+)?|\.\d+|\*\*|[-+*/^()×÷·−])/y;
+    for (let i = 0; i < s.length;) {
+      re.lastIndex = i;
+      const t = re.exec(s);
+      if (!t) return null;
+      toks.push(t[1]);
+      i = re.lastIndex;
+    }
+    let depth = 0, op = false;
+    for (let k = 0; k < toks.length; k++) {
+      const t = toks[k], after = isNum(toks[k - 1]) || toks[k - 1] === ")";
+      if (isNum(t) && isNum(toks[k - 1])) return null; // "2 3": two numbers, not arithmetic
+      if (t === "(") { depth++; if (after) op = true; } // 2(…)
+      else if (t === ")") { if (--depth < 0) return null; }
+      else if (!isNum(t) && after) op = true; // a binary operator, not a sign
+    }
+    if (depth !== 0 || !(op || whole)) return null;
+    return arithLatex(toks);
+  }
+  // The earlier sides of a chain written as text, "… = 0.2 + 0.1 + 2(0.05 + 0.05) = 0.5 + 0.2 =",
+  // oldest first: only when everything between the "=" signs is arithmetic, back to the first
+  // side that isn't (the name being defined). The line's first side may follow words.
+  function textChain(before) {
+    const cutOff = before.length > 400;
+    const parts = before.slice(-400).split("=");
+    const chain = [];
+    if (parts.length < 2 || !textArith(parts[parts.length - 1], true)) return chain;
+    for (let k = parts.length - 2; k >= (cutOff ? 1 : 0); k--) {
+      if (/[<>!:]\s*$/.test(parts[k])) break; // <=, !=, :=
+      const t = k > 0 ? textArith(parts[k], true) : textArith(parts[k]);
+      if (!t) break;
+      if (!CALC_NUMBER.test(t)) chain.unshift(t);
+    }
+    return chain.slice(-8);
+  }
+  function arithLatex(toks) {
+    let out = "", k = 0;
+    const exponent = () => { // after ^: signs, then a number or (…), then maybe ^ again (2^3^2)
+      const st = k;
+      while (/^[-+−]$/.test(toks[k] || "")) k++;
+      if (toks[k] === "(") {
+        for (let d = 0; k < toks.length; k++) { if (toks[k] === "(") d++; else if (toks[k] === ")" && --d === 0) break; }
+      } else if (!isNum(toks[k])) return null;
+      if (++k > toks.length) return null;
+      if ((toks[k] === "^" || toks[k] === "**") && (k++, !exponent())) return null;
+      return toks.slice(st, k);
+    };
+    while (k < toks.length) {
+      const t = toks[k++];
+      if (t === "^" || t === "**") {
+        const e = exponent();
+        const inner = e && arithLatex(e);
+        if (!inner) return null;
+        out += "^{" + inner + "}";
+      } else out += TEXT_OPS[t] || t;
+    }
+    return out;
+  }
+  // A result to write as text: 0.7, 3/2, or $1.2 \times 10^{-5}$; null for anything else.
+  function textForm(latex) {
+    const t = String(latex || "").trim();
+    if (/^-?\d+(?:\.\d+)?$/.test(t)) return t;
+    const f = /^(-\s*)?\\frac\{(\d+)\}\{(\d+)\}$/.exec(t);
+    if (f) return (f[1] ? "-" : "") + f[2] + "/" + f[3];
+    if (/^-?\d+(?:\.\d+)? \\times 10\^\{-?\d+\}$/.test(t)) return "$" + t + "$";
+    return null;
+  }
+  function textResult(r, note) { // note: kept only for a chain, whose warning it is
+    const main = textForm(r.latex), alt = r.alt ? textForm(r.alt.latex) : null;
+    if (main) return Object.assign({}, r, { text: main, note, alt: alt ? Object.assign({}, r.alt, { text: alt }) : null });
+    if (alt) return Object.assign({}, r.alt, { text: alt, alt: null, note }); // 2^(1/2): its decimal
+    return null;
+  }
+  // A result written after inline math has closed: a plain number as text, anything else in $…$.
+  const wrapForm = (l) => (/^-?\d+(?:\.\d+)?$/.test(String(l).trim()) ? String(l).trim() : "$" + l + "$");
+  function wrapResult(r) {
+    return Object.assign({}, r, { text: wrapForm(r.latex), alt: r.alt ? Object.assign({}, r.alt, { text: wrapForm(r.alt.latex) }) : null });
+  }
+  // Before \begin{document} (when the file has one), "=" is settings, not arithmetic.
+  function inPreamble(doc, line) {
+    const begin = /^[^%]*\\begin\s*\{document\}/;
+    for (let l = line; l >= doc.firstLine(); l--) if (begin.test(doc.getLine(l))) return false;
+    for (let l = line + 1; l <= doc.lastLine(); l++) if (begin.test(doc.getLine(l))) return true;
+    return false;
   }
 
   // The distributions declared before the "=" (X \sim N(100, 15^2)), so P(X > 130) has a value:
@@ -1866,16 +2020,19 @@
     return out.slice(-40);
   }
 
-  function requestCalc(entry, pos, lhs, spaced, decls) {
+  function requestCalc(entry, pos, lhs, spaced, decls, text, chain) {
     const id = ++calcSeq;
     const rev = calcRev;
     const body = decls && decls.length ? { latex: lhs, decls } : { latex: lhs };
+    if (chain && chain.length) body.chain = chain;
     T.api.post("/api/calc", body).then((res) => {
       if (!res) return;
       if (res.available === false) { calcAvailable = false; return; }
       if (id !== calcSeq || rev !== calcRev || current !== entry || !cm || !res.ok || !res.result) return;
       if (cmp(entry.doc.getCursor(), pos) !== 0 || entry.doc.somethingSelected() || !cm.hasFocus()) return;
-      showCalc(entry, pos, res.result, spaced);
+      const r = text === "wrap" ? wrapResult(res.result)
+        : text ? textResult(res.result, body.chain ? res.result.note || null : null) : res.result;
+      if (r) showCalc(entry, pos, r, spaced);
     }).catch(() => {});
   }
 
@@ -1891,7 +2048,7 @@
     const lead = spaced ? " " : "";
     const ghost = document.createElement("span");
     ghost.className = "texc-calc-ghost" + (r.approx ? " is-approx" : "");
-    ghost.textContent = (r.approx ? " ≈ " : lead) + r.latex;
+    ghost.textContent = (r.approx ? " ≈ " : lead) + (r.text != null ? r.text : r.latex);
     ghost.title = "Tab to insert";
     const bm = entry.doc.setBookmark(pos, { widget: ghost, insertLeft: true, handleMouseEvents: true });
 
@@ -1903,7 +2060,8 @@
     const mathEl = document.createElement("span");
     mathEl.className = "texc-calc-math";
     renderMath(mathEl, "\\displaystyle " + (r.approx ? "\\approx " : "= ") + r.latex);
-    main.append(mathEl, kbdEl("⇥"));
+    const opts = [{ el: main, kbd: kbdEl("⇥") }];
+    main.append(mathEl, opts[0].kbd);
     card.append(main);
     if (r.alt) {
       const alt = document.createElement("button");
@@ -1912,17 +2070,18 @@
       const am = document.createElement("span");
       am.className = "texc-calc-math";
       renderMath(am, "\\displaystyle " + (r.alt.approx ? "\\approx " : "= ") + r.alt.latex);
-      alt.append(am, kbdEl(IS_MAC ? "⌥⇥" : "Alt+⇥"));
+      opts.push({ el: alt, kbd: kbdEl("↓") });
+      alt.append(am, opts[1].kbd);
       alt.addEventListener("mousedown", (e) => { e.preventDefault(); acceptCalc(true); });
       card.append(alt);
     }
     if (r.note) {
       const note = document.createElement("div");
       note.className = "texc-calc-note";
-      const m = /^assuming (.+)$/.exec(String(r.note));
+      const m = /^assuming ([^$]+)$/.exec(String(r.note));
       if (m) renderMath(note, "\\text{assuming }" + m[1]);
       else {
-        // text with $…$ math: "$X$ normal, mean $100$, sd $15$"
+        // text with $…$ math: "$X$ normal, mean $100$, sd $15$", "⚠ doesn't match $2 + 3$, which is $5$"
         String(r.note).split("$").forEach((part, i) => {
           if (!part) return;
           const span = document.createElement("span");
@@ -1934,7 +2093,7 @@
       card.append(note);
     }
     main.addEventListener("mousedown", (e) => { e.preventDefault(); acceptCalc(false); });
-    ghost.addEventListener("mousedown", (e) => { e.preventDefault(); acceptCalc(false); });
+    ghost.addEventListener("mousedown", (e) => { e.preventDefault(); acceptCalc(); });
     card.addEventListener("mousedown", (e) => e.preventDefault()); // keep the editor focused
     cm.addWidget(pos, card, false, "near");
     // Below the line unless that is out of sight (the docked chat covers the editor's bottom).
@@ -1944,7 +2103,22 @@
       card.classList.add("is-above");
       cm.addWidget(pos, card, false, "above");
     }
-    calc = { entry, pos, bm, card, r, spaced };
+    calc = { entry, pos, bm, card, r, spaced, ghost, opts, sel: 0, moved: false };
+    selectCalc(0);
+  }
+  // Which of the two results (the first, or the other way of writing it) Tab inserts: ↑ ↓ choose.
+  function selectCalc(i) {
+    const c = calc;
+    if (!c || (i && !c.r.alt)) return;
+    c.sel = i ? 1 : 0;
+    const pick = c.sel ? c.r.alt : c.r;
+    c.ghost.className = "texc-calc-ghost" + (pick.approx ? " is-approx" : "");
+    c.ghost.textContent = (pick.approx ? " ≈ " : c.spaced ? " " : "") + (pick.text != null ? pick.text : pick.latex);
+    c.opts.forEach((o, k) => {
+      o.el.classList.toggle("is-selected", k === c.sel);
+      o.kbd.textContent = k === c.sel ? "⇥" : k > c.sel ? "↓" : "↑";
+    });
+    try { c.bm.changed(); } catch (_) { /* the ghost keeps its old width */ }
   }
   function kbdEl(text) {
     const k = document.createElement("span");
@@ -1961,9 +2135,10 @@
     if (c.card.parentNode) c.card.parentNode.removeChild(c.card);
   }
 
-  function acceptCalc(useAlt) {
+  function acceptCalc(useAlt) { // no argument: the selected one
     const c = calc;
     if (!c) return false;
+    if (useAlt === undefined) useAlt = c.sel === 1;
     const pick = useAlt ? c.r.alt : c.r;
     if (!pick) return false;
     hideCalc();
@@ -1971,11 +2146,13 @@
     if (c.entry !== current || cmp(doc.getCursor(), c.pos) !== 0) return false;
     const eq = Pos(c.pos.line, c.pos.ch - 1);
     const lead = c.spaced ? " " : "";
+    const text = pick.text != null; // outside math: written as text, \approx in its own $…$
+    const out = text ? pick.text : pick.latex;
     if (pick.approx && doc.getRange(eq, c.pos) === "=") {
       // a rounded decimal: the "=" becomes \approx
-      doc.replaceRange("\\approx" + lead + pick.latex, eq, c.pos, "+calc");
+      doc.replaceRange((text ? "$\\approx$" : "\\approx") + lead + out, eq, c.pos, "+calc");
     } else {
-      doc.replaceRange(lead + pick.latex, c.pos, c.pos, "+calc");
+      doc.replaceRange(lead + out, c.pos, c.pos, "+calc");
     }
     T.bus.emit("editor:calc", { latex: pick.latex, approx: !!pick.approx });
     return true;
@@ -1995,6 +2172,20 @@
       e.preventDefault();
       hideCalc();
       return;
+    }
+    if (calc && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+      // two results: ↑ ↓ choose between them; Enter inserts once one has been chosen that way
+      if (calc.r.alt && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+        e.preventDefault();
+        calc.moved = true;
+        selectCalc(calc.sel ? 0 : 1);
+        return;
+      }
+      if (calc.moved && e.key === "Enter") {
+        e.preventDefault();
+        acceptCalc();
+        return;
+      }
     }
     if (e.altKey && !e.metaKey && !e.ctrlKey && (e.code === "KeyY" || e.code === "KeyN")) {
       if (!current || !current.hunks.length) return; // nothing to review: let the key type
@@ -2074,7 +2265,7 @@
     const k = {
       "Ctrl-Space": (cmi) => cmi.showHint(HINT_OPTIONS),
       Tab: (cmi) => {
-        if (acceptCalc(false)) return;
+        if (acceptCalc()) return;
         if (cmi.somethingSelected() && cmi.getSelection().indexOf("\n") >= 0) cmi.indentSelection("add");
         else cmi.replaceSelection(" ".repeat(cmi.getOption("indentUnit")), "end", "+input");
       },
@@ -2301,8 +2492,10 @@
     },
     // extras
     revealHunk,
-    calcSuggestion: () => (calc ? { latex: calc.r.latex, approx: !!calc.r.approx, alt: calc.r.alt || null, note: calc.r.note || null } : null),
+    calcSuggestion: () => (calc ? { latex: calc.r.latex, text: calc.r.text != null ? calc.r.text : null, approx: !!calc.r.approx,
+      alt: calc.r.alt || null, note: calc.r.note || null, sel: calc.sel } : null),
     acceptCalc,
+    calcParts, textChain, // how a formula / a text line splits into the last side and its chain (for the checks)
     focus() { if (cm) cm.focus(); },
     get cm() { return cm; },
   };

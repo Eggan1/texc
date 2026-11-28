@@ -2443,7 +2443,7 @@ class MathEngine:
             return {"available": False, "error": (self.missing or {}).get("error"),
                     "install": "python3 -m pip install --user sympy"}
 
-    def compute(self, latex: str, decls=None) -> dict:
+    def compute(self, latex: str, decls=None, chain=None) -> dict:
         if self.closed:
             return {"ok": False, "error": "stopping"}
         if not self.lock.acquire(timeout=self.TIMEOUT):
@@ -2456,6 +2456,8 @@ class MathEngine:
             req = {"id": rid, "latex": latex}
             if decls:
                 req["decls"] = decls
+            if chain:
+                req["chain"] = chain
             try:
                 self.proc.stdin.write(json.dumps(req) + "\n")
                 self.proc.stdin.flush()
@@ -3845,16 +3847,21 @@ class Handler(BaseHTTPRequestHandler):
         return self.app.math.status()
 
     def api_calc(self, q, body):
-        """The value of a LaTeX formula, for the editor's "=" suggestions: {latex, decls?} -> {ok, result}.
+        """The value of a LaTeX formula, for the editor's "=" suggestions: {latex, decls?, chain?} -> {ok, result}.
         decls: the document's distribution declarations before the "=", [{name, dist}] (the text either
-        side of each \\sim; mathcalc parses them like any formula). {warm: true} starts the SymPy
-        worker ahead of time and answers like GET."""
+        side of each \\sim; mathcalc parses them like any formula). chain: the earlier sides of a chain
+        of equalities, oldest first (A = B = C =: latex C, chain [A, B]); with one, latex may be empty.
+        {warm: true} starts the SymPy worker ahead of time and answers like GET."""
         if not isinstance(body, dict):
             raise ApiError(400, "Expected a JSON object.")
         if body.get("warm"):
             return self.app.math.status()
+        chain = []
+        raw = body.get("chain")
+        if isinstance(raw, list):
+            chain = [c for c in raw[-8:] if isinstance(c, str) and c.strip() and len(c) <= 2000]
         latex = body.get("latex")
-        if not isinstance(latex, str) or not latex.strip():
+        if not isinstance(latex, str) or not (latex.strip() or chain):
             raise ApiError(400, "latex must be a non-empty string.")
         if len(latex) > 4000:
             return {"ok": True, "result": None}
@@ -3864,7 +3871,7 @@ class Handler(BaseHTTPRequestHandler):
             for d in raw[-40:]:
                 if isinstance(d, dict) and isinstance(d.get("name"), str) and isinstance(d.get("dist"), str):
                     decls.append({"name": d["name"][-120:], "dist": d["dist"][:300]})
-        return self.app.math.compute(latex, decls)
+        return self.app.math.compute(latex, decls, chain)
 
     def api_open_pdf(self, q, body):
         proj = self.app.project
