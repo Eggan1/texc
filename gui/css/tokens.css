@@ -32,11 +32,20 @@
   --card-hover: #f2f2f2;
   --page-bg: #f4f4f4;
   --syn-text: #d6d6d6;
-  --syn-cmd: #ededed;
-  --syn-arg: #e5c07b;
-  --syn-math: #c792ea;
-  --syn-comment: #6a6a6a;
-  --syn-number: #f78c6c;
+  /* TeX colours as in VS Code's dark theme */
+  --syn-cmd: #dcdcaa;     /* \newpage, \begin, \frac outside math */
+  --syn-ctl: #c586c0;     /* \usepackage, \label, \ref, \\, & */
+  --syn-kw: #ff7b72;      /* \item, \newcommand; \int, \alpha in math */
+  --syn-esc: #d7ba7d;     /* \%, \$ */
+  --syn-math: #4ec9b0;    /* math; package and class names */
+  --syn-const: #79c0ff;   /* commands in math; \ref and \cite keys */
+  --syn-number: #b5cea8;  /* numbers in math */
+  --syn-name: #ffa657;    /* section titles, label names */
+  --syn-env: #c9d1d9;     /* environment names, bold and italic text */
+  --syn-comment: #8b949e;
+  --syn-b1: #ffd700;      /* brackets by nesting depth */
+  --syn-b2: #da70d6;
+  --syn-b3: #179fff;
   --syn-gutter: #5c5c5c;
   --radius-sm: 6px;
   --radius: 10px;

@@ -40,12 +40,28 @@
 .cm-s-texc.CodeMirror span.CodeMirror-nonmatchingbracket { color: var(--red) !important; }
 
 /* LaTeX tokens (texc-latex mode). Later rules win, so math beats brace/arg colours. */
+/* A token carries a base class and often a second one that recolours it, so the order of
+   these rules matters: later ones win. */
+.cm-s-texc .cm-tex-math,
+.cm-s-texc .cm-tex-type { color: var(--syn-math); }
 .cm-s-texc .cm-tex-cmd { color: var(--syn-cmd); }
-.cm-s-texc .cm-tex-arg,
-.cm-s-texc .cm-tex-brace { color: var(--syn-arg); }
-.cm-s-texc .cm-tex-math { color: var(--syn-math); }
-.cm-s-texc .cm-tex-comment { color: var(--syn-comment); font-style: italic; }
+.cm-s-texc .cm-tex-ctl { color: var(--syn-ctl); }
+.cm-s-texc .cm-tex-kw,
+.cm-s-texc .cm-tex-sym { color: var(--syn-kw); }
+.cm-s-texc .cm-tex-esc { color: var(--syn-esc); }
+.cm-s-texc .cm-tex-const { color: var(--syn-const); }
 .cm-s-texc .cm-tex-number { color: var(--syn-number); }
+.cm-s-texc .cm-tex-name { color: var(--syn-name); }
+.cm-s-texc .cm-tex-env,
+.cm-s-texc .cm-tex-bold,
+.cm-s-texc .cm-tex-ital { color: var(--syn-env); }
+.cm-s-texc .cm-tex-bold { font-weight: 700; }
+.cm-s-texc .cm-tex-ital { font-style: italic; }
+.cm-s-texc .cm-tex-link { text-decoration: underline; }
+.cm-s-texc .cm-tex-b1 { color: var(--syn-b1); }
+.cm-s-texc .cm-tex-b2 { color: var(--syn-b2); }
+.cm-s-texc .cm-tex-b3 { color: var(--syn-b3); }
+.cm-s-texc .cm-tex-comment { color: var(--syn-comment); }
 .cm-s-texc .cm-tex-verb { color: #bdbdbd; }
 .cm-s-texc .cm-searching { background: rgba(229, 192, 123, .22); box-shadow: 0 0 0 1px rgba(229, 192, 123, .35); border-radius: 2px; }
 

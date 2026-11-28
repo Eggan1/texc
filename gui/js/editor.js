@@ -67,10 +67,48 @@
 
   // ------------------------------------------------------------------ LaTeX mode
   // stex tags generic command arguments as plain text and treats math environments as text, so
-  // texc uses its own small tokenizer. Token classes (cm-*): tex-cmd, tex-arg, tex-brace, tex-math,
-  // tex-comment, tex-number, tex-verb.
+  // texc uses its own small tokenizer. The colours follow VS Code's dark theme with its LaTeX
+  // grammar. Token classes (cm-*):
+  //   tex-cmd      a command; plus tex-ctl (\usepackage, \label, \ref, \\), tex-kw (\item,
+  //                \newcommand) or tex-esc (\%) where VS Code uses another colour
+  //   tex-arg      text in a command argument; plus tex-env, tex-name, tex-const, tex-type,
+  //                tex-bold, tex-ital or tex-link when the command colours its argument
+  //   tex-math     everything in math; plus tex-const (\frac), tex-sym (\int, \alpha), tex-number
+  //   tex-brace    { } and argument [ ]
+  //   tex-b1..b3   any paired bracket, by nesting depth
+  //   tex-comment, tex-verb
   const MATH_ENV = /^(?:equation|align|alignat|flalign|xalignat|xxalignat|gather|multline|eqnarray|displaymath|math|dmath|dgroup|darray|IEEEeqnarray|IEEEeqnarraybox)\*?$/;
   const VERB_ENV = /^(?:verbatim|Verbatim|BVerbatim|LVerbatim|lstlisting|minted|alltt|comment|filecontents)\*?$/;
+  const CMD_CTL = /^(?:documentclass|usepackage|z?label|input|include|includeonly|newline|pagebreak|clearpage|linebreak|pause|backmatter|frontmatter|mainmatter|csname|endcsname|else|fi|unless|if(?:case|cat|csname|defined|dim|eof|false|fontchar|hbox|hmode|inner|mmode|num|odd|true|vbox|vmode|void|x)?)$/;
+  const CMD_KW = /^(?:item|(?:re)?newcommand|providecommand|(?:re)?newrobustcmd|DeclareRobustCommand|(?:re)?newenvironment|(?:New|Re[Nn]ew|Provide|Declare)Document(?:Command|Environment))$/;
+  const CMD_REF = /^(?!h(?:yper)?ref$)[A-Za-z]*[rR]ef(?:range)?$/; // \ref, \eqref, \cref; not \href
+  const CMD_CITE = /^[A-Za-z]*[cC]ite[A-Za-z]*$/;
+  const CMD_SEC = /^(?:part|chapter|(?:sub){0,2}section|(?:sub)?paragraph|addpart|addchap|addsec|minisec|frametitle)$/;
+  // \left( and \bigl( open a bracket, \right) and \bigr) close one; plain \big( does neither.
+  const MATH_BIG = /^(?:left|right|(?:big|Big|bigg|Bigg)([lrm]?))$/;
+  const MATH_DELIM = /^(?:[()[\]<>.|]|\\[{}|]|\\[lr]?[Vv]ert(?![A-Za-z])|\\[lr]angle(?![A-Za-z]))/;
+  // Named symbols (Greek letters, big operators, relations, arrows) take the symbol colour;
+  // every other command in math takes the constant colour.
+  const MATH_SYM = new Set((
+    "alpha beta gamma delta epsilon varepsilon zeta eta theta vartheta iota kappa varkappa lambda mu nu xi pi varpi " +
+    "rho varrho sigma varsigma tau upsilon phi varphi chi psi omega digamma " +
+    "Gamma Delta Theta Lambda Xi Pi Sigma Upsilon Phi Psi Omega " +
+    "sum prod coprod int oint bigcap bigcup bigsqcup bigvee bigwedge bigodot bigotimes bigoplus biguplus " +
+    "le leq leqq leqslant ge geq geqq geqslant neq ll gg sim simeq approx approxeq cong equiv propto doteq asymp " +
+    "prec succ preceq succeq mid nmid parallel nparallel perp models vdash dashv in ni " +
+    "subset supset subseteq supseteq subsetneq supsetneq sqsubset sqsupset sqsubseteq sqsupseteq " +
+    "times div cdot cdots ldots vdots ddots pm mp cup cap sqcup sqcap uplus setminus smallsetminus " +
+    "oplus ominus otimes oslash odot circ bullet star ast dagger ddagger wedge vee neg wr amalg diamond " +
+    "mapsto longmapsto leftarrow rightarrow leftrightarrow Leftarrow Rightarrow Leftrightarrow " +
+    "longleftarrow longrightarrow longleftrightarrow Longleftarrow Longrightarrow Longleftrightarrow " +
+    "uparrow downarrow updownarrow Uparrow Downarrow Updownarrow nearrow searrow swarrow nwarrow " +
+    "hookleftarrow hookrightarrow leftharpoonup rightharpoonup leftharpoondown rightharpoondown rightleftharpoons " +
+    "leadsto " +
+    "infty partial nabla forall exists nexists emptyset varnothing ell hbar imath jmath wp Re Im aleph beth " +
+    "angle measuredangle triangle triangleleft triangleright bigtriangleup bigtriangledown square Box blacksquare " +
+    "top bot prime backslash surd flat natural sharp clubsuit diamondsuit heartsuit spadesuit " +
+    "therefore because complement lfloor rfloor lceil rceil langle rangle"
+  ).split(" "));
   const endReCache = new Map();
   function endEnvRe(name) {
     let re = endReCache.get(name);
@@ -80,18 +118,56 @@
 
   CM.defineMode("texc-latex", function () {
     // state.stack holds brace frames: "arg" / "opt" (command arguments), "grp" (bare group),
-    // "mgrp" (group inside math). state.expect: 1 right after a command (spaces allowed before
-    // its argument), 2 right after an argument (only an immediately following { or [ continues).
+    // "mgrp" (group inside math). An argument frame may carry the colour its command asks for,
+    // as "arg:name"; "opt:name" keeps it for the argument after the optional one.
+    // state.expect: 1 right after a command (spaces allowed before its argument), 2 right after
+    // an argument (only an immediately following { or [ continues).
+    // state.br lists the open brackets for the depth colours: "c" for { and "r" for ( and [,
+    // which may close each other as in [0, 1).
     const top = (s) => s.stack[s.stack.length - 1];
-    function inArg(s) {
-      for (let i = s.stack.length - 1; i >= 0; i--) if (s.stack[i] === "arg" || s.stack[i] === "opt") return true;
-      return false;
+    const isArg = (f) => f !== undefined && f.charCodeAt(0) === 97; // "arg…"
+    const isOpt = (f) => f !== undefined && f.charCodeAt(0) === 111; // "opt…"
+    const kindOf = (f) => (f.length > 3 ? f.slice(4) : null);
+    // Style of plain text here: the nearest argument that has a colour, else plain "tex-arg".
+    function argStyle(s) {
+      let any = false;
+      for (let i = s.stack.length - 1; i >= 0; i--) {
+        const f = s.stack[i];
+        if (isArg(f)) { if (f.length > 3) return "tex-arg tex-" + f.slice(4); any = true; }
+        else if (isOpt(f)) any = true;
+      }
+      return any ? "tex-arg" : null;
     }
-    function enterMath(s, end, env) { s.math = { end, env: env || null, depth: s.stack.length }; s.expect = 0; s.envCmd = null; }
-    function leaveMath(s) { s.stack.length = s.math.depth; s.math = null; s.expect = 0; }
+    function openB(s, kind) { const d = s.br.length; s.br += kind; return " tex-b" + (d % 3 + 1); }
+    // "" when nothing matches: the bracket then keeps the colour of the text around it.
+    function closeB(s, kind) {
+      const i = kind === "c" ? s.br.lastIndexOf("c") : s.br.charAt(s.br.length - 1) === "r" ? s.br.length - 1 : -1;
+      if (i < 0) return "";
+      s.br = s.br.slice(0, i);
+      return " tex-b" + (i % 3 + 1);
+    }
+    function enterMath(s, end, env) { s.math = { end, env: env || null, depth: s.stack.length, br: s.br.length }; s.expect = 0; s.envCmd = null; s.argKind = null; }
+    function leaveMath(s) { s.stack.length = s.math.depth; s.br = s.br.slice(0, s.math.br); s.math = null; s.expect = 0; }
+    // The colour of a command in text, and (in state.argKind) of its first argument.
+    function cmdStyle(s, name) {
+      s.argKind = null;
+      if (name === "begin" || name === "end") { s.argKind = "env"; return "tex-cmd"; }
+      if (CMD_KW.test(name)) return "tex-cmd tex-kw";
+      if (CMD_CTL.test(name)) {
+        if (/label$/.test(name)) s.argKind = "name";
+        else if (name === "documentclass" || name === "usepackage") s.argKind = "type";
+        return "tex-cmd tex-ctl";
+      }
+      if (CMD_REF.test(name) || CMD_CITE.test(name)) { s.argKind = "const"; return "tex-cmd tex-ctl"; }
+      if (CMD_SEC.test(name)) s.argKind = "name";
+      else if (name === "textbf") s.argKind = "bold";
+      else if (name === "emph" || name === "textit") s.argKind = "ital";
+      else if (name === "url" || name === "href") s.argKind = "link";
+      return "tex-cmd";
+    }
 
     function tokenText(stream, s) {
-      const A = inArg(s) ? "tex-arg" : null;
+      const A = argStyle(s);
       if (stream.eatSpace()) { if (s.expect === 2) s.expect = 0; return A; }
       const ch = stream.next();
       if (ch === "%") { stream.skipToEnd(); return "tex-comment"; }
@@ -99,68 +175,77 @@
         if (stream.match(/^[A-Za-z@]+\*?/)) {
           const name = stream.current().slice(1).replace(/\*$/, "");
           s.envCmd = name === "begin" || name === "end" ? name : null;
+          const style = cmdStyle(s, name);
           if (name === "verb") {
             const d = stream.peek();
-            if (d && !/[\sA-Za-z*]/.test(d)) { stream.next(); s.verbDelim = d; s.expect = 0; return "tex-cmd"; }
+            if (d && !/[\sA-Za-z*]/.test(d)) { stream.next(); s.verbDelim = d; s.expect = 0; return style; }
           }
           s.expect = 1;
-          return "tex-cmd";
+          return style;
         }
         const c2 = stream.next();
         if (c2 === "(") { enterMath(s, "\\)"); return "tex-math"; }
         if (c2 === "[") { enterMath(s, "\\]"); return "tex-math"; }
         s.envCmd = null;
+        s.argKind = null;
         s.expect = c2 === "\\" ? 1 : 0; // \\[2pt]
-        return "tex-cmd";
+        if (c2 === "\\") return "tex-cmd tex-ctl";
+        if (c2 === "{") return "tex-cmd" + openB(s, "r");
+        if (c2 === "}") return "tex-cmd" + (closeB(s, "r") || " tex-esc");
+        return c2 === "," || c2 === ";" ? "tex-cmd" : "tex-cmd tex-esc";
       }
       if (ch === "$") { enterMath(s, stream.eat("$") ? "$$" : "$"); return "tex-math"; }
       if (ch === "{") {
         if (s.expect) {
-          s.stack.push("arg");
+          s.stack.push(s.argKind ? "arg:" + s.argKind : "arg");
+          s.argKind = null;
           if (s.envCmd) s.env = { cmd: s.envCmd, depth: s.stack.length, name: "" };
           s.envCmd = null;
           s.expect = 0;
-          return "tex-arg tex-brace";
+          return "tex-brace" + openB(s, "c");
         }
         s.envCmd = null;
         s.stack.push("grp");
-        return A ? "tex-arg tex-brace" : "tex-brace";
+        return "tex-brace" + openB(s, "c");
       }
       if (ch === "}") {
         const t = top(s);
+        const style = "tex-brace" + closeB(s, "c");
         s.envCmd = null;
-        if (t === "arg") {
+        if (isArg(t)) {
           s.stack.pop();
           const env = s.env;
           if (env && env.depth === s.stack.length + 1) {
             s.env = null;
             const name = env.name.trim();
             if (env.cmd === "begin") {
-              if (MATH_ENV.test(name)) { enterMath(s, "env", name); return "tex-arg tex-brace"; }
+              if (MATH_ENV.test(name)) { enterMath(s, "env", name); return style; }
               if (VERB_ENV.test(name)) { s.verbPending = name; s.verbStyle = /^comment/.test(name) ? "tex-comment" : "tex-verb"; }
             }
           }
           s.expect = 2;
-          return "tex-arg tex-brace";
+          return style;
         }
-        if (t === "grp") { s.stack.pop(); return inArg(s) ? "tex-arg tex-brace" : "tex-brace"; }
-        s.expect = 0;
-        return A ? "tex-arg tex-brace" : "tex-brace";
+        if (t === "grp") s.stack.pop();
+        else s.expect = 0;
+        return style;
       }
       if (ch === "[") {
-        if (s.expect) { s.stack.push("opt"); s.expect = 0; return "tex-arg tex-brace"; }
+        if (s.expect) { s.stack.push(s.argKind ? "opt:" + s.argKind : "opt"); s.expect = 0; return "tex-brace" + openB(s, "r"); }
         s.envCmd = null;
-        return A;
+        return openB(s, "r").slice(1);
       }
       if (ch === "]") {
-        if (top(s) === "opt") { s.stack.pop(); s.expect = 2; return "tex-arg tex-brace"; }
+        if (isOpt(top(s))) { s.argKind = kindOf(s.stack.pop()); s.expect = 2; return "tex-brace" + closeB(s, "r"); }
         s.expect = 0;
-        return A;
+        return closeB(s, "r").slice(1) || A;
       }
       s.expect = 0;
-      if (/\d/.test(ch)) { stream.match(/^\d*(?:\.\d+)?/); return A || "tex-number"; }
-      if ("&~^_#".indexOf(ch) >= 0) return A || "tex-cmd";
-      stream.eatWhile(/[^\s\\{}[\]$%&~^_#\d]/);
+      if (ch === "(") return openB(s, "r").slice(1);
+      if (ch === ")") return closeB(s, "r").slice(1) || A;
+      if (ch === "&") return "tex-cmd tex-ctl";
+      if ("~^_#".indexOf(ch) >= 0) return A;
+      stream.eatWhile(/[^\s\\{}[\]()$%&~^_#]/);
       if (s.env && s.env.depth === s.stack.length) s.env.name += stream.current();
       return A;
     }
@@ -178,22 +263,50 @@
       }
       const ch = stream.next();
       if (ch === "%") { stream.skipToEnd(); return "tex-comment"; }
-      if (ch === "\\") { if (!stream.match(/^[A-Za-z@]+/)) stream.next(); return "tex-math"; }
-      if (ch === "{") { s.stack.push("mgrp"); return "tex-math tex-brace"; }
-      if (ch === "}") { if (s.stack.length > m.depth) s.stack.pop(); return "tex-math tex-brace"; }
-      stream.eatWhile(/[^\\{}$%]/);
+      if (ch === "\\") {
+        if (stream.match(/^[A-Za-z@]+/)) {
+          const name = stream.current().slice(1);
+          const big = MATH_BIG.exec(name);
+          if (big) {
+            const side = name === "left" || big[1] === "l" ? 1 : name === "right" || big[1] === "r" ? -1 : 0;
+            if (!side) return stream.match(MATH_DELIM, false) ? "tex-math" : "tex-math tex-const";
+            if (!stream.match(MATH_DELIM)) return "tex-math tex-const";
+            return "tex-math" + (side > 0 ? openB(s, "r") : closeB(s, "r"));
+          }
+          // an environment inside math (cases, pmatrix) reads as it does outside
+          if (name === "begin" || name === "end") { if (stream.peek() === "{") s.argKind = "env"; return "tex-math tex-cmd"; }
+          if (name === "langle" || name === "lvert" || name === "lVert") return "tex-math" + openB(s, "r");
+          if (name === "rangle" || name === "rvert" || name === "rVert") return "tex-math" + (closeB(s, "r") || " tex-sym");
+          return MATH_SYM.has(name) ? "tex-math tex-sym" : "tex-math tex-const";
+        }
+        const c2 = stream.next();
+        if (c2 === "\\") return "tex-math tex-ctl";
+        if (c2 === "{") return "tex-math" + openB(s, "r");
+        if (c2 === "}") return "tex-math" + (closeB(s, "r") || " tex-esc");
+        return c2 === "," || c2 === ";" ? "tex-math tex-cmd" : "tex-math tex-esc";
+      }
+      if (ch === "{") { s.stack.push(s.argKind === "env" ? "mgrp:env" : "mgrp"); s.argKind = null; return "tex-math tex-brace" + openB(s, "c"); }
+      if (ch === "}") { if (s.stack.length > m.depth) s.stack.pop(); return "tex-math tex-brace" + closeB(s, "c"); }
+      if (top(s) === "mgrp:env" && /[A-Za-z*]/.test(ch)) { stream.eatWhile(/[A-Za-z*]/); return "tex-math tex-env"; }
+      if (ch === "(" || ch === "[") return "tex-math" + openB(s, "r");
+      if (ch === ")" || ch === "]") return "tex-math" + closeB(s, "r");
+      if (ch === "&") return "tex-math tex-ctl";
+      if (/\d/.test(ch)) { stream.match(/^\d*(?:\.\d+)?/); return "tex-math tex-number"; }
+      if (ch === "." && stream.match(/^\d+/)) return "tex-math tex-number";
+      stream.eatWhile(/[^\\{}$%()[\]&.\d]/);
       return "tex-math";
     }
 
     return {
-      startState: () => ({ stack: [], math: null, expect: 0, envCmd: null, env: null, verb: null, verbPending: null, verbStyle: null, verbDelim: null }),
+      startState: () => ({ stack: [], br: "", math: null, expect: 0, argKind: null, envCmd: null, env: null, verb: null, verbPending: null, verbStyle: null, verbDelim: null }),
       copyState: (s) => ({
-        stack: s.stack.slice(), math: s.math && Object.assign({}, s.math), expect: s.expect, envCmd: s.envCmd,
+        stack: s.stack.slice(), br: s.br, math: s.math && Object.assign({}, s.math), expect: s.expect, argKind: s.argKind, envCmd: s.envCmd,
         env: s.env && Object.assign({}, s.env), verb: s.verb, verbPending: s.verbPending, verbStyle: s.verbStyle, verbDelim: s.verbDelim,
       }),
       token(stream, s) {
         if (stream.sol()) {
           s.expect = 0;
+          s.argKind = null;
           s.verbDelim = null; // \verb cannot span lines
           if (s.verbPending) { s.verb = s.verbPending; s.verbPending = null; }
         }
@@ -212,11 +325,13 @@
         return s.math ? tokenMath(stream, s) : tokenText(stream, s);
       },
       blankLine(s) {
-        s.expect = 0; s.envCmd = null; s.env = null; s.verbDelim = null;
+        s.expect = 0; s.argKind = null; s.envCmd = null; s.env = null; s.verbDelim = null;
         if (s.verbPending) { s.verb = s.verbPending; s.verbPending = null; }
         if (s.verb) return;
-        if (s.math && s.math.end !== "env") s.math = null; // inline/display math cannot span paragraphs
+        if (s.math && s.math.end !== "env") { s.br = s.br.slice(0, s.math.br); s.math = null; } // inline/display math cannot span paragraphs
         if (!s.math) s.stack.length = 0; // a paragraph break also ends stray groups
+        s.br = s.br.replace(/r/g, ""); // and stray ( [, but a { } group may hold several paragraphs
+        if (s.math) s.math.br = Math.min(s.math.br, s.br.length);
       },
       lineComment: "%",
     };
@@ -231,13 +346,13 @@
       token(stream, s) {
         if (stream.eatSpace()) return null;
         if (s.depth === 0) {
-          if (stream.match(/^@[A-Za-z]+/)) { s.head = true; return "tex-math"; }
+          if (stream.match(/^@[A-Za-z]+/)) { s.head = true; return "tex-cmd tex-kw"; }
           if (s.head && stream.eat(/[{(]/)) { s.depth = 1; s.head = false; s.key = true; return "tex-brace"; }
           stream.next();
           stream.eatWhile((c) => c !== "@");
           return "tex-comment"; // bibtex ignores text between entries
         }
-        if (s.key) { s.key = false; if (stream.match(/^[^,\s{}()]+/)) return "tex-arg"; }
+        if (s.key) { s.key = false; if (stream.match(/^[^,\s{}()]+/)) return "tex-arg tex-name"; }
         const ch = stream.next();
         if (ch === "{") { s.depth++; return "tex-brace"; }
         if (ch === "}" || (ch === ")" && s.depth === 1)) { s.depth = Math.max(0, s.depth - 1); s.quote = false; return "tex-brace"; }
@@ -245,7 +360,7 @@
           if (ch === '"') { s.quote = !s.quote; return null; }
           if (s.quote) { stream.eatWhile(/[^"{}]/); return null; }
           if (/\d/.test(ch)) { stream.eatWhile(/\d/); return "tex-number"; }
-          if (/[A-Za-z]/.test(ch)) { stream.eatWhile(/[\w\-:.]/); return "tex-cmd"; }
+          if (/[A-Za-z]/.test(ch)) { stream.eatWhile(/[\w\-:.]/); return "tex-const"; }
           return null;
         }
         stream.eatWhile(/[^{}]/);
